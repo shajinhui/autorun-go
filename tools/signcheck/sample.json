@@ -1,0 +1,13 @@
+{
+  "query": {"schoolId": "3680"},
+  "body": {
+    "appVersion": "1.8.3",
+    "brand": "Xiaomi",
+    "deviceToken": "dummy_device_token",
+    "deviceType": "android",
+    "mobileType": "Mi 11",
+    "password": "e10adc3949ba59abbe56e057f20f883e",
+    "sysVersion": "Android 11",
+    "userPhone": "13438440146"
+  }
+}
