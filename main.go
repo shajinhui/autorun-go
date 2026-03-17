@@ -51,9 +51,10 @@ func getCredentials() (string, string, error) {
 }
 
 type CredentialsPayload struct {
-	Phone    string `json:"phone"`
-	Password string `json:"password"`
-	Action   string `json:"action"`
+	Phone       string `json:"phone"`
+	Password    string `json:"password"`
+	Action      string `json:"action"`
+	AdminToken  string `json:"adminToken"`
 }
 
 type ActionResponse struct {
@@ -62,22 +63,38 @@ type ActionResponse struct {
 	Response interface{} `json:"response"`
 }
 
-func getCredentialsFromEvent(event TimerEvent) (string, string, bool) {
+func getPayloadFromEvent(event TimerEvent) (CredentialsPayload, bool) {
 	raw := strings.TrimSpace(event.Body)
 	if raw == "" {
 		raw = strings.TrimSpace(event.Message)
 	}
 	if raw == "" {
-		return "", "", false
+		return CredentialsPayload{}, false
 	}
 	var payload CredentialsPayload
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		return "", "", false
+		return CredentialsPayload{}, false
 	}
-	if payload.Phone == "" || payload.Password == "" {
-		return "", "", false
+	return payload, true
+}
+
+func isAdminTokenValid(token string) bool {
+	adminToken := strings.TrimSpace(os.Getenv("ADMIN_TOKEN"))
+	if adminToken == "" {
+		return false
 	}
-	return payload.Phone, payload.Password, true
+	return token != "" && token == adminToken
+}
+
+func resolveCredentials(event TimerEvent) (string, string, error) {
+	payload, ok := getPayloadFromEvent(event)
+	if ok && payload.Phone != "" && payload.Password != "" {
+		return payload.Phone, payload.Password, nil
+	}
+	if ok && isAdminTokenValid(payload.AdminToken) {
+		return getCredentials()
+	}
+	return "", "", fmt.Errorf("缺少手机号或密码（或管理员口令无效）")
 }
 
 func getActionFromEvent(event TimerEvent) string {
@@ -111,13 +128,9 @@ func HandleRequest(ctx context.Context, event TimerEvent) (string, error) {
 
 	// 1. 模拟登录获取 Token
 	fmt.Println(">>> 1. 开始模拟登录...")
-	phone, password, ok := getCredentialsFromEvent(event)
-	if !ok {
-		var err error
-		phone, password, err = getCredentials()
-		if err != nil {
-			return "", err
-		}
+	phone, password, err := resolveCredentials(event)
+	if err != nil {
+		return "", err
 	}
 	action := getActionFromEvent(event)
 	switch action {
