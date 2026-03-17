@@ -72,6 +72,10 @@ func AutoClubService(ctx context.Context, input ClubInput) (api.Response[map[str
 	if err != nil {
 		return api.Response[map[string]any]{Code: 50000, Msg: fmt.Sprintf("获取签到信息失败: %v", err)}, err
 	}
+	if tfInfo == nil || isEmptySignInTf(tfInfo) {
+		fmt.Println("没有可签到项目，继续后续流程")
+		return api.Response[map[string]any]{Code: 10000, Msg: "没有可签到项目，继续后续流程", Response: map[string]any{}}, nil
+	}
 	if tfInfo != nil && (tfInfo.SignInStatus == "1" || tfInfo.SignBackStatus == "1") {
 		fmt.Printf("可签到项目: activityId=%d name=%s start=%s end=%s signStatus=%s signInStatus=%s signBackStatus=%s\n",
 			tfInfo.ActivityId,
@@ -82,27 +86,7 @@ func AutoClubService(ctx context.Context, input ClubInput) (api.Response[map[str
 			tfInfo.SignInStatus,
 			tfInfo.SignBackStatus,
 		)
-		return api.Response[map[string]any]{
-			Code: 10000,
-			Msg:  "已有待签到项目",
-			Response: map[string]any{
-				"activityId":     tfInfo.ActivityId,
-				"activityName":   tfInfo.ActivityName,
-				"startTime":      tfInfo.StartTime,
-				"endTime":        tfInfo.EndTime,
-				"signStatus":     tfInfo.SignStatus,
-				"signInStatus":   tfInfo.SignInStatus,
-				"signBackStatus": tfInfo.SignBackStatus,
-				"latitude":       tfInfo.Latitude,
-				"longitude":      tfInfo.Longitude,
-			},
-		}, nil
 	} 
-	
-	if tfInfo == nil {
-		fmt.Println("没有可签到项目，继续后续流程")
-		return api.Response[map[string]any]{Code: 10000, Msg: "没有可签到项目，继续后续流程", Response: map[string]any{}}, nil
-	}
 
 	// 3. 查询未来活动（安卓：今天 + 6 天）
 	// queryDate := time.Now().Add(6 * 24 * time.Hour).Format("2006-01-02")
@@ -191,4 +175,20 @@ func AutoClubService(ctx context.Context, input ClubInput) (api.Response[map[str
 			"activityName": tfInfo.ActivityName,
 		},
 	}, nil
+}
+
+func isEmptySignInTf(tfInfo *api.SignInTf) bool {
+	if tfInfo == nil {
+		return true
+	}
+	isZeroStatus := func(v string) bool { return v == "" || v == "0" }
+	return tfInfo.ActivityId == 0 &&
+		tfInfo.ActivityName == "" &&
+		tfInfo.StartTime == "" &&
+		tfInfo.EndTime == "" &&
+		tfInfo.Latitude == "" &&
+		tfInfo.Longitude == "" &&
+		isZeroStatus(tfInfo.SignStatus) &&
+		isZeroStatus(tfInfo.SignInStatus) &&
+		isZeroStatus(tfInfo.SignBackStatus)
 }
