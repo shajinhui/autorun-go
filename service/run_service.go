@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"autorun-go/api"
 	"autorun-go/track"
+	api "autorun-go/unirunapi"
 )
 
 type RunInput struct {
@@ -32,7 +32,7 @@ type RunResult struct {
 func SubmitRun(ctx context.Context, locations []track.Location, input RunInput) (RunResult, error) {
 	_ = ctx
 
-	token, userID, schoolID, err := api.Login(
+	loginInfo, err := api.Login(
 		input.Phone,
 		input.Password,
 		input.AppVersion,
@@ -46,12 +46,12 @@ func SubmitRun(ctx context.Context, locations []track.Location, input RunInput) 
 		return RunResult{}, fmt.Errorf("登录失败: %v", err)
 	}
 
-	runStandard, err := api.GetRunStandard(token, schoolID)
+	runStandard, err := api.GetRunStandard(loginInfo.Token, loginInfo.SchoolID)
 	if err != nil {
 		return RunResult{}, fmt.Errorf("获取跑步标准失败: %v", err)
 	}
 
-	bounds, err := api.GetSchoolBound(token, schoolID)
+	bounds, err := api.GetSchoolBound(loginInfo.Token, loginInfo.SchoolID)
 	if err != nil {
 		return RunResult{}, fmt.Errorf("获取学校围栏失败: %v", err)
 	}
@@ -71,7 +71,7 @@ func SubmitRun(ctx context.Context, locations []track.Location, input RunInput) 
 		SysVersions:        input.SysVersion,
 		RunDistance:        input.RunDistance,
 		RunTime:            input.RunTime,
-		UserID:             userID,
+		UserID:             loginInfo.UserID,
 		YearSemester:       runStandard.SemesterYear,
 		RecordDate:         recordDate,
 		RealityTrackPoints: realityTrackPoints,
@@ -82,14 +82,14 @@ func SubmitRun(ctx context.Context, locations []track.Location, input RunInput) 
 		AgainRunStatus:     "0",
 	}
 
-	result, err := api.RecordNew(token, recordBody)
+	result, err := api.RecordNew(loginInfo.Token, recordBody)
 	if err != nil {
 		return RunResult{}, fmt.Errorf("提交打卡失败: %v", err)
 	}
 
 	return RunResult{
 		RawResponse: result,
-		UserID:      userID,
-		SchoolID:    schoolID,
+		UserID:      loginInfo.UserID,
+		SchoolID:    loginInfo.SchoolID,
 	}, nil
 }

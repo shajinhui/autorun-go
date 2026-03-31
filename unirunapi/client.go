@@ -7,12 +7,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 )
 
 const (
-	AppKey = "389885588s0648fa"
-	Host   = "https://run-lb.tanmasports.com/"
+	AppKey    = "389885588s0648fa"
+	Host      = "https://run-lb.tanmasports.com/"
 	userAgent = "okhttp/3.12.0"
 )
 
@@ -20,10 +21,18 @@ const (
 
 type UserInfo struct {
 	UserId     int64 `json:"userId"`
+	StudentId  int64 `json:"studentId"`
 	SchoolId   int64 `json:"schoolId"`
 	OauthToken struct {
 		Token string `json:"token"`
 	} `json:"oauthToken"`
+}
+
+type LoginResult struct {
+	Token     string
+	UserID    int64
+	StudentID int64
+	SchoolID  int64
 }
 
 type SchoolBound struct {
@@ -55,8 +64,8 @@ type NewRecordBody struct {
 
 // ================= 核心接口实现 =================
 
-// Login 模拟登录，返回 token, userId, schoolId, error
-func Login(phone, password, appVersion, brand, deviceToken, deviceType, mobileType, sysVersion string) (string, int64, int64, error) {
+// Login 模拟登录，返回统一对象，避免多返回值错位。
+func Login(phone, password, appVersion, brand, deviceToken, deviceType, mobileType, sysVersion string) (LoginResult, error) {
 	hash := md5.Sum([]byte(password))
 	passMD5 := fmt.Sprintf("%x", hash)
 
@@ -84,7 +93,7 @@ func Login(phone, password, appVersion, brand, deviceToken, deviceType, mobileTy
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", 0, 0, err
+		return LoginResult{}, err
 	}
 	defer resp.Body.Close()
 
@@ -93,14 +102,19 @@ func Login(phone, password, appVersion, brand, deviceToken, deviceType, mobileTy
 	// 解析泛型 JSON
 	var result Response[UserInfo]
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return "", 0, 0, fmt.Errorf("JSON解析失败: %v", err)
+		return LoginResult{}, fmt.Errorf("JSON解析失败: %v\n原始响应: %s", err, string(respBody))
 	}
 
 	if result.Code != 10000 {
-		return "", 0, 0, fmt.Errorf("登录失败: %s", result.Msg)
+		return LoginResult{}, fmt.Errorf("登录失败: %s (响应: %s)", result.Msg, string(respBody))
 	}
 
-	return result.Response.OauthToken.Token, result.Response.UserId, result.Response.SchoolId, nil
+	return LoginResult{
+		Token:     result.Response.OauthToken.Token,
+		UserID:    result.Response.UserId,
+		StudentID: result.Response.StudentId,
+		SchoolID:  result.Response.SchoolId,
+	}, nil
 }
 
 // GetSchoolBound 获取学校围栏
@@ -209,9 +223,8 @@ func RecordNew(token string, body NewRecordBody) (string, error) {
 	return string(respBody), nil
 }
 
-
 // GetSignInTf 获取签到坐标与状态 (对应 Request.java 的 getSignInTf)
-func  GetSignInTf(token string, studentId int64) (*SignInTf, error) {
+func GetSignInTf(token string, studentId int64) (*SignInTf, error) {
 	studentIdStr := strconv.FormatInt(studentId, 10)
 	params := map[string]string{
 		"studentId": studentIdStr,
@@ -244,7 +257,6 @@ func  GetSignInTf(token string, studentId int64) (*SignInTf, error) {
 	return &result.Response, nil
 }
 
-
 // SignInOrSignBack 提交签到/签退 (对应 Request.java 的 signInOrSignBack)
 func SignInOrSignBack(token string, body SignInOrSignBackBody) (string, error) {
 	bodyBytes, _ := json.Marshal(body)
@@ -275,81 +287,118 @@ func SignInOrSignBack(token string, body SignInOrSignBackBody) (string, error) {
 	return string(respBody), nil
 }
 
-// // GetClubActivityList 获取活动列表 (对应 Request.java 的 getActivityList)
-// func GetClubActivityList(token string, studentId int64, date string, schoolId int64) ([]ClubInfo, error) {
-// 	studentIdStr := strconv.FormatInt(studentId, 10)
-// 	schoolIdStr := strconv.FormatInt(schoolId, 10)
+// GetClubActivityList 获取活动列表 (对应 Request.java 的 getActivityList)
+func GetClubActivityList(token string, studentId int64, date string, schoolId int64) ([]ClubInfo, error) {
+	studentIdStr := strconv.FormatInt(studentId, 10)
+	schoolIdStr := strconv.FormatInt(schoolId, 10)
 
-// 	params := map[string]string{
-// 		"queryTime": date,
-// 		"studentId": studentIdStr,
-// 		"schoolId":  schoolIdStr, // 安卓端这里有时候被硬编码为 "3680"
-// 		"pageNo":    "1",
-// 		"pageSize":  "30",
-// 	}
-// 	sign := GenerateSign(params, "") // GET 请求将 params 签名
+	params := map[string]string{
+		"queryTime": date,
+		"studentId": studentIdStr,
+		"schoolId":  schoolIdStr,
+		"pageNo":    "1",
+		"pageSize":  "15",
+	}
+	sign := GenerateSign(params, "")
 
-// 	apiURL := Host + "v1/clubactivity/queryActivityList?queryTime=" + url.QueryEscape(date) +
-// 		"&studentId=" + studentIdStr + "&schoolId=" + schoolIdStr + "&pageNo=1&pageSize=30"
+	apiURL := Host + "v1/clubactivity/queryActivityList?queryTime=" + url.QueryEscape(date) +
+		"&studentId=" + studentIdStr + "&schoolId=" + schoolIdStr + "&pageNo=1&pageSize=15"
 
-// 	req, _ := http.NewRequest("GET", apiURL, nil)
-// 	req.Header.Set("sign", sign)
-// 	req.Header.Set("token", token)
-// 	req.Header.Set("appkey", AppKey)
-// 	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
-// 	req.Header.Set("User-Agent", userAgent)
+	req, _ := http.NewRequest("GET", apiURL, nil)
+	req.Header.Set("sign", sign)
+	req.Header.Set("token", token)
+	req.Header.Set("appkey", AppKey)
+	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
+	req.Header.Set("User-Agent", userAgent)
 
-// 	client := &http.Client{}
-// 	resp, err := client.Do(req)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	defer resp.Body.Close()
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
 
-// 	respBody, _ := io.ReadAll(resp.Body)
-// 	var result Response[[]ClubInfo]
-// 	if err := json.Unmarshal(respBody, &result); err != nil {
-// 		return nil, err
-// 	}
-// 	if result.Code != 10000 {
-// 		return nil, fmt.Errorf("查询活动失败: %s", result.Msg)
-// 	}
-// 	return result.Response, nil
-// }
+	respBody, _ := io.ReadAll(resp.Body)
+	var result Response[[]ClubInfo]
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, err
+	}
+	if result.Code != 10000 {
+		return nil, fmt.Errorf("查询活动失败: %s", result.Msg)
+	}
+	return result.Response, nil
+}
 
-// // JoinClubActivity 报名俱乐部 (对应 Request.java 的 joinClub)
-// func JoinClubActivity(token string, studentId int64, activityId int64) (string, error) {
-// 	studentIdStr := strconv.FormatInt(studentId, 10)
-// 	activityIdStr := strconv.FormatInt(activityId, 10)
+// JoinClubActivity 报名俱乐部
+func JoinClubActivity(token string, studentId int64, activityId int64) (string, error) {
+	studentIdStr := strconv.FormatInt(studentId, 10)
+	activityIdStr := strconv.FormatInt(activityId, 10)
 
-// 	params := map[string]string{
-// 		"studentId":  studentIdStr,
-// 		"activityId": activityIdStr,
-// 	}
-// 	sign := GenerateSign(params, "")
+	params := map[string]string{
+		"studentId":  studentIdStr,
+		"activityId": activityIdStr,
+	}
+	sign := GenerateSign(params, "")
 
-// 	apiURL := Host + "v1/clubactivity/joinClubActivity?studentId=" + studentIdStr + "&activityId=" + activityIdStr
-// 	req, _ := http.NewRequest("GET", apiURL, nil)
-// 	req.Header.Set("sign", sign)
-// 	req.Header.Set("token", token)
-// 	req.Header.Set("appkey", AppKey)
-// 	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
-// 	req.Header.Set("User-Agent", userAgent)
+	apiURL := Host + "v1/clubactivity/joinClubActivity?studentId=" + studentIdStr + "&activityId=" + activityIdStr
+	req, _ := http.NewRequest("GET", apiURL, nil)
+	req.Header.Set("sign", sign)
+	req.Header.Set("token", token)
+	req.Header.Set("appkey", AppKey)
+	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
+	req.Header.Set("User-Agent", userAgent)
 
-// 	client := &http.Client{}
-// 	resp, err := client.Do(req)
-// 	if err != nil {
-// 		return "", err
-// 	}
-// 	defer resp.Body.Close()
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
 
-// 	respBody, _ := io.ReadAll(resp.Body)
-// 	var result Response[map[string]any]
-// 	if err := json.Unmarshal(respBody, &result); err != nil {
-// 		return "", err
-// 	}
-// 	if result.Code != 10000 {
-// 		return "", fmt.Errorf("加入俱乐部失败: %s", result.Msg)
-// 	}
-// 	return string(respBody), nil
-// }
+	respBody, _ := io.ReadAll(resp.Body)
+	var result Response[map[string]any]
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", err
+	}
+	if result.Code != 10000 {
+		return "", fmt.Errorf("加入俱乐部失败: %s", result.Msg)
+	}
+	return string(respBody), nil
+}
+
+// CancelClubActivity 取消报名
+func CancelClubActivity(token string, studentId int64, activityId int64) (string, error) {
+	studentIdStr := strconv.FormatInt(studentId, 10)
+	activityIdStr := strconv.FormatInt(activityId, 10)
+
+	params := map[string]string{
+		"studentId":  studentIdStr,
+		"activityId": activityIdStr,
+	}
+	sign := GenerateSign(params, "")
+
+	apiURL := Host + "v1/clubactivity/cancelActivity?studentId=" + studentIdStr + "&activityId=" + activityIdStr
+	req, _ := http.NewRequest("GET", apiURL, nil)
+	req.Header.Set("sign", sign)
+	req.Header.Set("token", token)
+	req.Header.Set("appkey", AppKey)
+	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
+	req.Header.Set("User-Agent", userAgent)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	var result Response[any]
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", err
+	}
+	if result.Code != 10000 {
+		return "", fmt.Errorf("取消报名失败: %s", result.Msg)
+	}
+	return string(respBody), nil
+}

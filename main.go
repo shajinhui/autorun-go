@@ -8,7 +8,9 @@ import (
 	"math/rand/v2"
 	"os"
 	"strings"
+	"time"
 
+	api "autorun-go/unirunapi"
 	// 注意：这里的 campus-run-auto 替换为你 go mod init 时使用的真实模块名
 	"autorun-go/service"
 	"autorun-go/track"
@@ -51,10 +53,12 @@ func getCredentials() (string, string, error) {
 }
 
 type CredentialsPayload struct {
-	Phone       string `json:"phone"`
-	Password    string `json:"password"`
-	Action      string `json:"action"`
-	AdminToken  string `json:"adminToken"`
+	Phone      string `json:"phone"`
+	Password   string `json:"password"`
+	Action     string `json:"action"`
+	AdminToken string `json:"adminToken"`
+	QueryDate  string `json:"queryDate"`
+	ActivityID int64  `json:"activityId"`
 }
 
 type ActionResponse struct {
@@ -115,6 +119,14 @@ func getActionFromEvent(event TimerEvent) string {
 	return strings.ToLower(payload.Action)
 }
 
+func getFullPayload(event TimerEvent) CredentialsPayload {
+	payload, ok := getPayloadFromEvent(event)
+	if !ok {
+		return CredentialsPayload{}
+	}
+	return payload
+}
+
 // HandleRequest 是云函数的入口处理逻辑
 func HandleRequest(ctx context.Context, event TimerEvent) (string, error) {
 	fmt.Printf("云函数被触发，时间: %s\n", event.Time)
@@ -133,7 +145,35 @@ func HandleRequest(ctx context.Context, event TimerEvent) (string, error) {
 		return "", err
 	}
 	action := getActionFromEvent(event)
+	fullPayload := getFullPayload(event)
 	switch action {
+	case "login":
+		loginInfo, err := api.Login(
+			phone,
+			password,
+			AppVersion,
+			Brand,
+			DeviceToken,
+			DeviceType,
+			MobileType,
+			SysVersion,
+		)
+		if err != nil {
+			return "", err
+		}
+		payload, err := json.Marshal(ActionResponse{
+			Code: 10000,
+			Msg:  "ok",
+			Response: map[string]any{
+				"userId":    loginInfo.UserID,
+				"studentId": loginInfo.StudentID,
+				"schoolId":  loginInfo.SchoolID,
+			},
+		})
+		if err != nil {
+			return "", err
+		}
+		return string(payload), nil
 	case "run":
 		result, err := service.SubmitRun(ctx, locations, service.RunInput{
 			Phone:       phone,
@@ -188,10 +228,115 @@ func HandleRequest(ctx context.Context, event TimerEvent) (string, error) {
 			return "", err
 		}
 		return string(payload), nil
+	case "club_data":
+		loginInfo, err := api.Login(
+			phone,
+			password,
+			AppVersion,
+			Brand,
+			DeviceToken,
+			DeviceType,
+			MobileType,
+			SysVersion,
+		)
+		if err != nil {
+			return "", err
+		}
+		queryDate := strings.TrimSpace(fullPayload.QueryDate)
+		if queryDate == "" {
+			queryDate = time.Now().Format("2006-01-02")
+		}
+
+		tfInfo, err := api.GetSignInTf(loginInfo.Token, loginInfo.StudentID)
+		if err != nil {
+			return "", err
+		}
+		activities, err := api.GetClubActivityList(loginInfo.Token, loginInfo.StudentID, queryDate, loginInfo.SchoolID)
+		if err != nil {
+			return "", err
+		}
+
+		payload, err := json.Marshal(ActionResponse{
+			Code: 10000,
+			Msg:  "ok",
+			Response: map[string]any{
+				"queryDate":  queryDate,
+				"signTask":   tfInfo,
+				"activities": activities,
+			},
+		})
+		if err != nil {
+			return "", err
+		}
+		return string(payload), nil
+	case "club_join":
+		if fullPayload.ActivityID <= 0 {
+			return "", fmt.Errorf("缺少 activityId")
+		}
+		loginInfo, err := api.Login(
+			phone,
+			password,
+			AppVersion,
+			Brand,
+			DeviceToken,
+			DeviceType,
+			MobileType,
+			SysVersion,
+		)
+		if err != nil {
+			return "", err
+		}
+		rawResp, err := api.JoinClubActivity(loginInfo.Token, loginInfo.StudentID, fullPayload.ActivityID)
+		if err != nil {
+			return "", err
+		}
+		payload, err := json.Marshal(ActionResponse{
+			Code: 10000,
+			Msg:  "ok",
+			Response: map[string]any{
+				"rawResponse": rawResp,
+			},
+		})
+		if err != nil {
+			return "", err
+		}
+		return string(payload), nil
+	case "club_cancel":
+		if fullPayload.ActivityID <= 0 {
+			return "", fmt.Errorf("缺少 activityId")
+		}
+		loginInfo, err := api.Login(
+			phone,
+			password,
+			AppVersion,
+			Brand,
+			DeviceToken,
+			DeviceType,
+			MobileType,
+			SysVersion,
+		)
+		if err != nil {
+			return "", err
+		}
+		rawResp, err := api.CancelClubActivity(loginInfo.Token, loginInfo.StudentID, fullPayload.ActivityID)
+		if err != nil {
+			return "", err
+		}
+		payload, err := json.Marshal(ActionResponse{
+			Code: 10000,
+			Msg:  "ok",
+			Response: map[string]any{
+				"rawResponse": rawResp,
+			},
+		})
+		if err != nil {
+			return "", err
+		}
+		return string(payload), nil
 	default:
 		payload, _ := json.Marshal(ActionResponse{
-			Code: 40000,
-			Msg:  fmt.Sprintf("不支持的 action: %s", action),
+			Code:     40000,
+			Msg:      fmt.Sprintf("不支持的 action: %s", action),
 			Response: map[string]any{},
 		})
 		return string(payload), nil
@@ -205,6 +350,28 @@ func main() {
 
 	randTime := rand.IntN(5)
 	RunTime += randTime
+
+	// 本地测试模式
+	if len(os.Args) > 1 && os.Args[1] == "local" {
+		ctx := context.Background()
+		event := TimerEvent{
+			Type: "Timer",
+			Time: time.Now().Format(time.RFC3339),
+			Body: `{
+			"action":"club",
+			"phone":"18328488404",
+			"password":"Zc20060418"
+		}`,
+		}
+
+		result, err := HandleRequest(ctx, event)
+		if err != nil {
+			fmt.Printf("错误: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("结果: %s\n", result)
+		return
+	}
 
 	cloudfunction.Start(HandleRequest)
 }

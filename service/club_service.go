@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"autorun-go/api"
+	api "autorun-go/unirunapi"
 )
 
 // ClubAPI defines the minimal surface used by the club flow.
@@ -56,19 +56,19 @@ type ClubInput struct {
 func AutoClubService(ctx context.Context, input ClubInput) (api.Response[map[string]any], error) {
 	_ = ctx
 
-	
-
 	// 1. 登录获取 Token 和 ID
-	token, userID, _, err := api.Login(
+	loginInfo, err := api.Login(
 		input.Phone, input.Password, input.AppVersion, input.Brand,
 		input.DeviceToken, input.DeviceType, input.MobileType, input.SysVersion,
 	)
 	if err != nil {
 		return api.Response[map[string]any]{Code: 50000, Msg: fmt.Sprintf("登录失败: %v", err)}, err
 	}
+	token := loginInfo.Token
+	studentId := loginInfo.StudentID
 
 	// 2. 是否已有待签到项目（安卓：有则直接返回）
-	tfInfo, err := api.GetSignInTf(token, userID)
+	tfInfo, err := api.GetSignInTf(token, studentId)
 	if err != nil {
 		return api.Response[map[string]any]{Code: 50000, Msg: fmt.Sprintf("获取签到信息失败: %v", err)}, err
 	}
@@ -86,7 +86,7 @@ func AutoClubService(ctx context.Context, input ClubInput) (api.Response[map[str
 			tfInfo.SignInStatus,
 			tfInfo.SignBackStatus,
 		)
-	} 
+	}
 
 	// 3. 查询未来活动（安卓：今天 + 6 天）
 	// queryDate := time.Now().Add(6 * 24 * time.Hour).Format("2006-01-02")
@@ -161,7 +161,7 @@ func AutoClubService(ctx context.Context, input ClubInput) (api.Response[map[str
 		Latitude:   tfInfo.Latitude,
 		Longitude:  tfInfo.Longitude,
 		SignType:   signType,
-		StudentId:  userID,
+		StudentId:  studentId,
 	})
 	if err != nil {
 		return api.Response[map[string]any]{Code: 50000, Msg: fmt.Sprintf("签到/签退失败: %v", err)}, err
