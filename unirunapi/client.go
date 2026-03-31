@@ -402,3 +402,104 @@ func CancelClubActivity(token string, studentId int64, activityId int64) (string
 	}
 	return string(respBody), nil
 }
+
+// GetRunInfo 查询当前学期跑步统计信息
+func GetRunInfo(token string, userId int64, yearSemester string) (*RunInfo, error) {
+	userIdStr := strconv.FormatInt(userId, 10)
+	params := map[string]string{
+		"userId":       userIdStr,
+		"yearSemester": yearSemester,
+	}
+	sign := GenerateSign(params, "")
+
+	apiURL := Host + "v1/unirun/query/runInfo?userId=" + userIdStr + "&yearSemester=" + url.QueryEscape(yearSemester)
+	req, _ := http.NewRequest("GET", apiURL, nil)
+	req.Header.Set("sign", sign)
+	req.Header.Set("token", token)
+	req.Header.Set("appkey", AppKey)
+	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
+	req.Header.Set("User-Agent", userAgent)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	var result Response[RunInfo]
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, err
+	}
+	if result.Code != 10000 {
+		return nil, fmt.Errorf("查询跑步信息失败: %s", result.Msg)
+	}
+	return &result.Response, nil
+}
+
+// GetClubJoinNum 查询俱乐部参与次数与目标次数
+func GetClubJoinNum(token string, schoolId int64, studentId int64) (*ClubJoinNum, error) {
+	schoolIdStr := strconv.FormatInt(schoolId, 10)
+	studentIdStr := strconv.FormatInt(studentId, 10)
+	params := map[string]string{
+		"schoolId":  schoolIdStr,
+		"studentId": studentIdStr,
+	}
+	sign := GenerateSign(params, "")
+
+	apiURL := Host + "v1/clubactivity/getJoinNum?schoolId=" + schoolIdStr + "&studentId=" + studentIdStr
+	req, _ := http.NewRequest("GET", apiURL, nil)
+	req.Header.Set("sign", sign)
+	req.Header.Set("token", token)
+	req.Header.Set("appkey", AppKey)
+	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
+	req.Header.Set("User-Agent", userAgent)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	var result Response[ClubJoinNum]
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, err
+	}
+	if result.Code != 10000 {
+		return nil, fmt.Errorf("查询俱乐部参与进度失败: %s", result.Msg)
+	}
+	return &result.Response, nil
+}
+
+// GetSchoolActivityTopThree 查询学校俱乐部推荐活动（Top3）
+func GetSchoolActivityTopThree(token string) ([]ClubTopActivity, error) {
+	sign := GenerateSign(nil, "")
+
+	apiURL := Host + "v1/clubactivity/querySchoolActivityTopThree"
+	req, _ := http.NewRequest("GET", apiURL, nil)
+	req.Header.Set("sign", sign)
+	req.Header.Set("token", token)
+	req.Header.Set("appkey", AppKey)
+	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
+	req.Header.Set("User-Agent", userAgent)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	var result Response[[]ClubTopActivity]
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, err
+	}
+	if result.Code != 10000 {
+		return nil, fmt.Errorf("查询俱乐部推荐活动失败: %s", result.Msg)
+	}
+	return result.Response, nil
+}

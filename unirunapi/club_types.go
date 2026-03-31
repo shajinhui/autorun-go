@@ -46,3 +46,40 @@ type SignInOrSignBackBody struct {
 	SignType   string `json:"signType"`
 	StudentId  int64  `json:"studentId"`
 }
+
+type RunInfo struct {
+	SemesterID       int64 `json:"semesterId"`
+	YearSemester     int64 `json:"yearSemester"`
+	UserID           int64 `json:"userId"`
+	StudentID        int64 `json:"studentId"`
+	SchoolID         int64 `json:"schoolId"`
+	RunCount         int64 `json:"runCount"`
+	RunValidCount    int64 `json:"runValidCount"`
+	RunDistance      int64 `json:"runDistance"`
+	RunValidDistance int64 `json:"runValidDistance"`
+	RunDay           int64 `json:"runDay"`
+	RunValidDay      int64 `json:"runValidDay"`
+	RunCalorie       int64 `json:"runCalorie"`
+	RunValidCalorie  int64 `json:"runValidCalorie"`
+	InfoStatus       string `json:"infoStatus"`
+	CreateTime       string `json:"createTime"`
+}
+
+type ClubJoinNum struct {
+	TotalNum    int64 `json:"totalNum"`
+	JoinNum     int64 `json:"joinNum"`
+	RunTotalNum int64 `json:"runTotalNum"`
+	RunJoinNum  int64 `json:"runJoinNum"`
+}
+
+type ClubTopActivity struct {
+	ClubActivityID   string `json:"clubActivityId"`
+	ActivityItemID   string `json:"activityItemId"`
+	ItemName         string `json:"itemName"`
+	ActivityName     string `json:"activityName"`
+	StartTime        string `json:"startTime"`
+	EndTime          string `json:"endTime"`
+	AddressDetail    string `json:"addressDetail"`
+	MaxStudent       string `json:"maxStudent"`
+	ApplyStudentCount string `json:"applyStudentCount"`
+}

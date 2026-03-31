@@ -207,11 +207,68 @@ func handleAction(ctx context.Context, action string, payload credentialsPayload
 		if err != nil {
 			return actionResponse{}, http.StatusBadGateway, err
 		}
+		joinProgress, err := api.GetClubJoinNum(loginInfo.Token, loginInfo.SchoolID, loginInfo.StudentID)
+		if err != nil {
+			return actionResponse{}, http.StatusBadGateway, err
+		}
+		topThree, err := api.GetSchoolActivityTopThree(loginInfo.Token)
+		if err != nil {
+			return actionResponse{}, http.StatusBadGateway, err
+		}
 		return actionResponse{Code: 10000, Msg: "ok", Response: map[string]any{
-			"queryDate":  queryDate,
-			"signTask":   tfInfo,
-			"activities": activities,
-			"tokenSrc":   tokenSource,
+			"queryDate":     queryDate,
+			"signTask":      tfInfo,
+			"activities":    activities,
+			"joinProgress":  joinProgress,
+			"topThree":      topThree,
+			"tokenSrc":      tokenSource,
+		}}, http.StatusOK, nil
+
+	case "run_info":
+		loginInfo, tokenSource, err := loginWithCachePolicy(ctx, phone, password, payload, false)
+		if err != nil {
+			return actionResponse{}, http.StatusUnauthorized, err
+		}
+		runStandard, err := api.GetRunStandard(loginInfo.Token, loginInfo.SchoolID)
+		if err != nil {
+			return actionResponse{}, http.StatusBadGateway, err
+		}
+		runInfo, err := api.GetRunInfo(loginInfo.Token, loginInfo.UserID, runStandard.SemesterYear)
+		if err != nil {
+			return actionResponse{}, http.StatusBadGateway, err
+		}
+		return actionResponse{Code: 10000, Msg: "ok", Response: map[string]any{
+			"runStandard": runStandard,
+			"runInfo":     runInfo,
+			"tokenSrc":    tokenSource,
+		}}, http.StatusOK, nil
+
+	case "club_join_num":
+		loginInfo, tokenSource, err := loginWithCachePolicy(ctx, phone, password, payload, false)
+		if err != nil {
+			return actionResponse{}, http.StatusUnauthorized, err
+		}
+		joinProgress, err := api.GetClubJoinNum(loginInfo.Token, loginInfo.SchoolID, loginInfo.StudentID)
+		if err != nil {
+			return actionResponse{}, http.StatusBadGateway, err
+		}
+		return actionResponse{Code: 10000, Msg: "ok", Response: map[string]any{
+			"joinProgress": joinProgress,
+			"tokenSrc":     tokenSource,
+		}}, http.StatusOK, nil
+
+	case "club_top_three":
+		loginInfo, tokenSource, err := loginWithCachePolicy(ctx, phone, password, payload, false)
+		if err != nil {
+			return actionResponse{}, http.StatusUnauthorized, err
+		}
+		topThree, err := api.GetSchoolActivityTopThree(loginInfo.Token)
+		if err != nil {
+			return actionResponse{}, http.StatusBadGateway, err
+		}
+		return actionResponse{Code: 10000, Msg: "ok", Response: map[string]any{
+			"topThree": topThree,
+			"tokenSrc": tokenSource,
 		}}, http.StatusOK, nil
 
 	case "club_join":

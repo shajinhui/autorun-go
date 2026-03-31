@@ -1,6 +1,13 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "version": 2,
+  "functions": {
+    "api/index.go": {
+      "regions": [
+        "hkg1"
+      ]
+    }
+  },
   "builds": [
     {
       "src": "api/index.go",
