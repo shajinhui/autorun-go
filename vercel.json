@@ -1,14 +1,9 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "version": 2,
-  "functions": {
-    "api/**/*.go": {
-      "includeFiles": "map.json",
-      "regions": [
-        "hkg1"
-      ]
-    }
-  },
+  "regions": [
+    "hkg1"
+  ],
   "rewrites": [
     {
       "source": "/api/index",
