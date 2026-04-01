@@ -3,35 +3,27 @@
   "version": 2,
   "functions": {
     "api/index.go": {
+      "includeFiles": [
+        "map.json",
+        "api/map.json"
+      ],
       "regions": [
         "hkg1"
       ]
     }
   },
-  "builds": [
+  "rewrites": [
     {
-      "src": "api/index.go",
-      "use": "@vercel/go@latest",
-      "config": {
-        "includeFiles": [
-          "map.json",
-          "api/map.json"
-        ]
-      }
-    }
-  ],
-  "routes": [
-    {
-      "src": "/api/index",
-      "dest": "api/index.go"
+      "source": "/api/index",
+      "destination": "/api/index.go"
     },
     {
-      "src": "/api/(.*)",
-      "dest": "api/index.go"
+      "source": "/api/:path*",
+      "destination": "/api/index.go"
     },
     {
-      "src": "/",
-      "dest": "api/index.go"
+      "source": "/",
+      "destination": "/api/index.go"
     }
   ]
 }
