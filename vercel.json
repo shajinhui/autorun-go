@@ -3,10 +3,7 @@
   "version": 2,
   "functions": {
     "api/index.go": {
-      "includeFiles": [
-        "map.json",
-        "api/map.json"
-      ],
+      "includeFiles": "map.json",
       "regions": [
         "hkg1"
       ]
