@@ -1,2 +1,6 @@
 .vercel
 .env*.local
+.DS_Store
+.vscode/
+main
+main.zip
