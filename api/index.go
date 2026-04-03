@@ -33,6 +33,7 @@ type credentialsPayload struct {
 	Password     string `json:"password"`
 	Action       string `json:"action"`
 	AdminToken   string `json:"adminToken"`
+	SessionKey   string `json:"sessionKey"`
 	QueryDate    string `json:"queryDate"`
 	ActivityID   int64  `json:"activityId"`
 	StudentID    int64  `json:"studentId"`
@@ -115,6 +116,9 @@ func resolveCredentials(payload credentialsPayload, action string) (string, stri
 		}
 		return phone, password, nil
 	}
+	if strings.TrimSpace(payload.SessionKey) != "" {
+		return "", "", nil
+	}
 
 	if action == "login" || action == "run" || action == "club" {
 		return "", "", fmt.Errorf("缺少手机号或密码（或管理员口令无效）")
@@ -125,15 +129,16 @@ func resolveCredentials(payload credentialsPayload, action string) (string, stri
 func handleAction(ctx context.Context, action string, payload credentialsPayload, phone, password string) (actionResponse, int, error) {
 	switch action {
 	case "login":
-		loginInfo, tokenSource, err := loginWithCachePolicy(ctx, phone, password, payload, true)
+		loginInfo, tokenSource, sessionKey, err := loginWithCachePolicy(ctx, phone, password, payload, true)
 		if err != nil {
 			return actionResponse{}, http.StatusBadGateway, fmt.Errorf("登录失败: %v", err)
 		}
 		return actionResponse{Code: 10000, Msg: "ok", Response: map[string]any{
-			"userId":    loginInfo.UserID,
-			"studentId": loginInfo.StudentID,
-			"schoolId":  loginInfo.SchoolID,
-			"tokenSrc":  tokenSource,
+			"userId":     loginInfo.UserID,
+			"studentId":  loginInfo.StudentID,
+			"schoolId":   loginInfo.SchoolID,
+			"tokenSrc":   tokenSource,
+			"sessionKey": sessionKey,
 		}}, http.StatusOK, nil
 
 	case "run":
@@ -187,7 +192,7 @@ func handleAction(ctx context.Context, action string, payload credentialsPayload
 		return actionResponse{Code: res.Code, Msg: res.Msg, Response: res.Response}, http.StatusOK, nil
 
 	case "club_data":
-		loginInfo, tokenSource, err := loginWithCachePolicy(ctx, phone, password, payload, false)
+		loginInfo, tokenSource, sessionKey, err := loginWithCachePolicy(ctx, phone, password, payload, false)
 		if err != nil {
 			return actionResponse{}, http.StatusUnauthorized, err
 		}
@@ -197,9 +202,10 @@ func handleAction(ctx context.Context, action string, payload credentialsPayload
 		}
 		tfInfo, err := api.GetSignInTf(loginInfo.Token, loginInfo.StudentID)
 		if err != nil {
-			refreshed, refreshErr := retryWithFreshLogin(ctx, phone, password, loginInfo, payload)
+			refreshed, refreshedKey, refreshErr := retryWithFreshLogin(ctx, phone, password, loginInfo, payload)
 			if refreshErr == nil {
 				loginInfo = refreshed
+				sessionKey = refreshedKey
 				tokenSource = "relogin"
 				tfInfo, err = api.GetSignInTf(loginInfo.Token, loginInfo.StudentID)
 			}
@@ -220,16 +226,17 @@ func handleAction(ctx context.Context, action string, payload credentialsPayload
 			return actionResponse{}, http.StatusBadGateway, err
 		}
 		return actionResponse{Code: 10000, Msg: "ok", Response: map[string]any{
-			"queryDate":     queryDate,
-			"signTask":      tfInfo,
-			"activities":    activities,
-			"joinProgress":  joinProgress,
-			"topThree":      topThree,
-			"tokenSrc":      tokenSource,
+			"queryDate":    queryDate,
+			"signTask":     tfInfo,
+			"activities":   activities,
+			"joinProgress": joinProgress,
+			"topThree":     topThree,
+			"tokenSrc":     tokenSource,
+			"sessionKey":   sessionKey,
 		}}, http.StatusOK, nil
 
 	case "run_info":
-		loginInfo, tokenSource, err := loginWithCachePolicy(ctx, phone, password, payload, false)
+		loginInfo, tokenSource, sessionKey, err := loginWithCachePolicy(ctx, phone, password, payload, false)
 		if err != nil {
 			return actionResponse{}, http.StatusUnauthorized, err
 		}
@@ -245,10 +252,11 @@ func handleAction(ctx context.Context, action string, payload credentialsPayload
 			"runStandard": runStandard,
 			"runInfo":     runInfo,
 			"tokenSrc":    tokenSource,
+			"sessionKey":  sessionKey,
 		}}, http.StatusOK, nil
 
 	case "club_join_num":
-		loginInfo, tokenSource, err := loginWithCachePolicy(ctx, phone, password, payload, false)
+		loginInfo, tokenSource, sessionKey, err := loginWithCachePolicy(ctx, phone, password, payload, false)
 		if err != nil {
 			return actionResponse{}, http.StatusUnauthorized, err
 		}
@@ -259,10 +267,11 @@ func handleAction(ctx context.Context, action string, payload credentialsPayload
 		return actionResponse{Code: 10000, Msg: "ok", Response: map[string]any{
 			"joinProgress": joinProgress,
 			"tokenSrc":     tokenSource,
+			"sessionKey":   sessionKey,
 		}}, http.StatusOK, nil
 
 	case "club_top_three":
-		loginInfo, tokenSource, err := loginWithCachePolicy(ctx, phone, password, payload, false)
+		loginInfo, tokenSource, sessionKey, err := loginWithCachePolicy(ctx, phone, password, payload, false)
 		if err != nil {
 			return actionResponse{}, http.StatusUnauthorized, err
 		}
@@ -271,23 +280,25 @@ func handleAction(ctx context.Context, action string, payload credentialsPayload
 			return actionResponse{}, http.StatusBadGateway, err
 		}
 		return actionResponse{Code: 10000, Msg: "ok", Response: map[string]any{
-			"topThree": topThree,
-			"tokenSrc": tokenSource,
+			"topThree":   topThree,
+			"tokenSrc":   tokenSource,
+			"sessionKey": sessionKey,
 		}}, http.StatusOK, nil
 
 	case "club_join":
 		if payload.ActivityID <= 0 {
 			return actionResponse{}, http.StatusBadRequest, fmt.Errorf("缺少 activityId")
 		}
-		loginInfo, tokenSource, err := loginWithCachePolicy(ctx, phone, password, payload, false)
+		loginInfo, tokenSource, sessionKey, err := loginWithCachePolicy(ctx, phone, password, payload, false)
 		if err != nil {
 			return actionResponse{}, http.StatusUnauthorized, err
 		}
 		rawResp, err := api.JoinClubActivity(loginInfo.Token, loginInfo.StudentID, payload.ActivityID)
 		if err != nil {
-			refreshed, refreshErr := retryWithFreshLogin(ctx, phone, password, loginInfo, payload)
+			refreshed, refreshedKey, refreshErr := retryWithFreshLogin(ctx, phone, password, loginInfo, payload)
 			if refreshErr == nil {
 				loginInfo = refreshed
+				sessionKey = refreshedKey
 				tokenSource = "relogin"
 				rawResp, err = api.JoinClubActivity(loginInfo.Token, loginInfo.StudentID, payload.ActivityID)
 			}
@@ -298,21 +309,23 @@ func handleAction(ctx context.Context, action string, payload credentialsPayload
 		return actionResponse{Code: 10000, Msg: "ok", Response: map[string]any{
 			"rawResponse": rawResp,
 			"tokenSrc":    tokenSource,
+			"sessionKey":  sessionKey,
 		}}, http.StatusOK, nil
 
 	case "club_cancel":
 		if payload.ActivityID <= 0 {
 			return actionResponse{}, http.StatusBadRequest, fmt.Errorf("缺少 activityId")
 		}
-		loginInfo, tokenSource, err := loginWithCachePolicy(ctx, phone, password, payload, false)
+		loginInfo, tokenSource, sessionKey, err := loginWithCachePolicy(ctx, phone, password, payload, false)
 		if err != nil {
 			return actionResponse{}, http.StatusUnauthorized, err
 		}
 		rawResp, err := api.CancelClubActivity(loginInfo.Token, loginInfo.StudentID, payload.ActivityID)
 		if err != nil {
-			refreshed, refreshErr := retryWithFreshLogin(ctx, phone, password, loginInfo, payload)
+			refreshed, refreshedKey, refreshErr := retryWithFreshLogin(ctx, phone, password, loginInfo, payload)
 			if refreshErr == nil {
 				loginInfo = refreshed
+				sessionKey = refreshedKey
 				tokenSource = "relogin"
 				rawResp, err = api.CancelClubActivity(loginInfo.Token, loginInfo.StudentID, payload.ActivityID)
 			}
@@ -323,18 +336,20 @@ func handleAction(ctx context.Context, action string, payload credentialsPayload
 		return actionResponse{Code: 10000, Msg: "ok", Response: map[string]any{
 			"rawResponse": rawResp,
 			"tokenSrc":    tokenSource,
+			"sessionKey":  sessionKey,
 		}}, http.StatusOK, nil
 
 	case "session_bootstrap":
-		loginInfo, tokenSource, err := loginWithCachePolicy(ctx, phone, password, payload, false)
+		loginInfo, tokenSource, sessionKey, err := loginWithCachePolicy(ctx, phone, password, payload, false)
 		if err != nil {
 			return actionResponse{}, http.StatusUnauthorized, err
 		}
 		return actionResponse{Code: 10000, Msg: "ok", Response: map[string]any{
-			"userId":    loginInfo.UserID,
-			"studentId": loginInfo.StudentID,
-			"schoolId":  loginInfo.SchoolID,
-			"tokenSrc":  tokenSource,
+			"userId":     loginInfo.UserID,
+			"studentId":  loginInfo.StudentID,
+			"schoolId":   loginInfo.SchoolID,
+			"tokenSrc":   tokenSource,
+			"sessionKey": sessionKey,
 		}}, http.StatusOK, nil
 
 	default:
@@ -342,10 +357,21 @@ func handleAction(ctx context.Context, action string, payload credentialsPayload
 	}
 }
 
-func loginWithCachePolicy(ctx context.Context, phone, password string, payload credentialsPayload, alwaysFresh bool) (api.LoginResult, string, error) {
+func loginWithCachePolicy(ctx context.Context, phone, password string, payload credentialsPayload, alwaysFresh bool) (api.LoginResult, string, string, error) {
 	if !alwaysFresh && !payload.ForceRefresh {
 		store, err := storage.GetStore()
 		if err == nil && store != nil && store.Enabled() {
+			if strings.TrimSpace(payload.SessionKey) != "" {
+				session, source, loadErr := store.LoadBySessionKey(ctx, payload.SessionKey)
+				if loadErr == nil && session != nil {
+					return api.LoginResult{
+						Token:     session.Token,
+						UserID:    session.UserID,
+						StudentID: session.StudentID,
+						SchoolID:  session.SchoolID,
+					}, source, session.SessionKey, nil
+				}
+			}
 			if payload.StudentID > 0 {
 				session, source, loadErr := store.LoadByStudentID(ctx, payload.StudentID)
 				if loadErr == nil && session != nil {
@@ -354,7 +380,7 @@ func loginWithCachePolicy(ctx context.Context, phone, password string, payload c
 						UserID:    session.UserID,
 						StudentID: session.StudentID,
 						SchoolID:  session.SchoolID,
-					}, source, nil
+					}, source, session.SessionKey, nil
 				}
 			}
 			if phone != "" {
@@ -365,47 +391,57 @@ func loginWithCachePolicy(ctx context.Context, phone, password string, payload c
 						UserID:    session.UserID,
 						StudentID: session.StudentID,
 						SchoolID:  session.SchoolID,
-					}, source, nil
+					}, source, session.SessionKey, nil
 				}
 			}
 		}
 	}
 
 	if phone == "" || password == "" {
-		return api.LoginResult{}, "", fmt.Errorf("缺少可用登录态，且未提供手机号/密码")
+		return api.LoginResult{}, "", "", fmt.Errorf("缺少可用登录态，且未提供手机号/密码")
 	}
 	loginInfo, err := api.Login(phone, password, appVersion, brand, "", deviceType, mobileType, sysVersion)
 	if err != nil {
-		return api.LoginResult{}, "", err
+		return api.LoginResult{}, "", "", err
 	}
-	persistLogin(ctx, phone, loginInfo)
-	return loginInfo, "login", nil
+	sessionKey := persistLogin(ctx, phone, loginInfo, strings.TrimSpace(payload.SessionKey))
+	return loginInfo, "login", sessionKey, nil
 }
 
-func retryWithFreshLogin(ctx context.Context, phone, password string, current api.LoginResult, payload credentialsPayload) (api.LoginResult, error) {
+func retryWithFreshLogin(ctx context.Context, phone, password string, current api.LoginResult, payload credentialsPayload) (api.LoginResult, string, error) {
 	if phone == "" || password == "" {
-		return current, fmt.Errorf("token 已失效且无可用账号密码刷新")
+		return current, strings.TrimSpace(payload.SessionKey), fmt.Errorf("token 已失效且无可用账号密码刷新")
 	}
 	loginInfo, err := api.Login(phone, password, appVersion, brand, "", deviceType, mobileType, sysVersion)
 	if err != nil {
-		return current, err
+		return current, strings.TrimSpace(payload.SessionKey), err
 	}
-	persistLogin(ctx, phone, loginInfo)
-	return loginInfo, nil
+	sessionKey := strings.TrimSpace(payload.SessionKey)
+	persistedSessionKey := persistLogin(ctx, phone, loginInfo, sessionKey)
+	if persistedSessionKey != "" {
+		sessionKey = persistedSessionKey
+	}
+	return loginInfo, sessionKey, nil
 }
 
-func persistLogin(ctx context.Context, phone string, loginInfo api.LoginResult) {
+func persistLogin(ctx context.Context, phone string, loginInfo api.LoginResult, sessionKey string) string {
 	store, err := storage.GetStore()
 	if err != nil || store == nil || !store.Enabled() {
-		return
+		return ""
 	}
-	_ = store.Save(ctx, phone, storage.Session{
-		Token:     loginInfo.Token,
-		UserID:    loginInfo.UserID,
-		StudentID: loginInfo.StudentID,
-		SchoolID:  loginInfo.SchoolID,
-		UpdatedAt: time.Now(),
-	})
+	session := storage.Session{
+		Token:      loginInfo.Token,
+		UserID:     loginInfo.UserID,
+		StudentID:  loginInfo.StudentID,
+		SchoolID:   loginInfo.SchoolID,
+		SessionKey: strings.TrimSpace(sessionKey),
+		UpdatedAt:  time.Now(),
+	}
+	persistedSessionKey, err := store.Save(ctx, phone, session)
+	if err != nil {
+		return ""
+	}
+	return persistedSessionKey
 }
 
 func loadTrackMap() ([]track.Location, error) {
