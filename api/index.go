@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
@@ -15,6 +16,9 @@ import (
 	"autorun-go/track"
 	api "autorun-go/unirunapi"
 )
+
+//go:embed map.json
+var embeddedMapJSON []byte
 
 const (
 	appVersion = "1.8.3"
@@ -405,6 +409,13 @@ func persistLogin(ctx context.Context, phone string, loginInfo api.LoginResult) 
 }
 
 func loadTrackMap() ([]track.Location, error) {
+	if len(embeddedMapJSON) > 0 {
+		var locations []track.Location
+		if err := json.Unmarshal(embeddedMapJSON, &locations); err == nil && len(locations) > 0 {
+			return locations, nil
+		}
+	}
+
 	candidates := []string{"api/map.json", "map.json", "./map.json", "/var/task/map.json"}
 	var lastErr error
 	for _, path := range candidates {
