@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"autorun-go/service"
 	"autorun-go/storage"
 	"autorun-go/track"
 	api "autorun-go/unirunapi"
@@ -103,6 +102,9 @@ func writeJSON(w http.ResponseWriter, status int, payload interface{}) {
 }
 
 func resolveCredentials(payload credentialsPayload, action string) (string, string, error) {
+	if action == "store_debug" {
+		return "", "", nil
+	}
 	if payload.Phone != "" && payload.Password != "" {
 		return payload.Phone, payload.Password, nil
 	}
@@ -142,27 +144,26 @@ func handleAction(ctx context.Context, action string, payload credentialsPayload
 		}}, http.StatusOK, nil
 
 	case "run":
-		if phone == "" || password == "" {
-			return actionResponse{}, http.StatusUnauthorized, fmt.Errorf("run 需要手机号和密码")
-		}
 		locations, err := loadTrackMap()
 		if err != nil {
 			return actionResponse{}, http.StatusInternalServerError, err
 		}
+		loginInfo, tokenSource, sessionKey, err := loginWithCachePolicy(ctx, phone, password, payload, false)
+		if err != nil {
+			return actionResponse{}, http.StatusUnauthorized, err
+		}
 		runDistance := int64(4675 + rand.IntN(500))
 		runTime := 31 + rand.IntN(5)
-		result, err := service.SubmitRun(ctx, locations, service.RunInput{
-			Phone:       phone,
-			Password:    password,
-			RunDistance: runDistance,
-			RunTime:     runTime,
-			AppVersion:  appVersion,
-			Brand:       brand,
-			MobileType:  mobileType,
-			SysVersion:  sysVersion,
-			DeviceToken: "",
-			DeviceType:  deviceType,
-		})
+		result, err := submitRunWithSession(locations, loginInfo, runDistance, runTime)
+		if err != nil && isTokenExpiredError(err) {
+			refreshed, refreshedKey, refreshErr := retryWithFreshLogin(ctx, phone, password, loginInfo, payload)
+			if refreshErr == nil {
+				loginInfo = refreshed
+				sessionKey = refreshedKey
+				tokenSource = "relogin"
+				result, err = submitRunWithSession(locations, loginInfo, runDistance, runTime)
+			}
+		}
 		if err != nil {
 			return actionResponse{}, http.StatusBadGateway, err
 		}
@@ -170,26 +171,35 @@ func handleAction(ctx context.Context, action string, payload credentialsPayload
 			"rawResponse": result.RawResponse,
 			"userId":      result.UserID,
 			"schoolId":    result.SchoolID,
+			"tokenSrc":    tokenSource,
+			"sessionKey":  sessionKey,
 		}}, http.StatusOK, nil
 
 	case "club":
-		if phone == "" || password == "" {
-			return actionResponse{}, http.StatusUnauthorized, fmt.Errorf("club 需要手机号和密码")
+		loginInfo, tokenSource, sessionKey, err := loginWithCachePolicy(ctx, phone, password, payload, false)
+		if err != nil {
+			return actionResponse{}, http.StatusUnauthorized, err
 		}
-		res, err := service.AutoClubService(ctx, service.ClubInput{
-			Phone:       phone,
-			Password:    password,
-			AppVersion:  appVersion,
-			Brand:       brand,
-			MobileType:  mobileType,
-			SysVersion:  sysVersion,
-			DeviceToken: "",
-			DeviceType:  deviceType,
-		})
+		res, err := autoClubWithSession(loginInfo)
+		if err != nil && isTokenExpiredError(err) {
+			refreshed, refreshedKey, refreshErr := retryWithFreshLogin(ctx, phone, password, loginInfo, payload)
+			if refreshErr == nil {
+				loginInfo = refreshed
+				sessionKey = refreshedKey
+				tokenSource = "relogin"
+				res, err = autoClubWithSession(loginInfo)
+			}
+		}
 		if err != nil {
 			return actionResponse{}, http.StatusBadGateway, err
 		}
-		return actionResponse{Code: res.Code, Msg: res.Msg, Response: res.Response}, http.StatusOK, nil
+		body := res.Response
+		if body == nil {
+			body = map[string]any{}
+		}
+		body["tokenSrc"] = tokenSource
+		body["sessionKey"] = sessionKey
+		return actionResponse{Code: res.Code, Msg: res.Msg, Response: body}, http.StatusOK, nil
 
 	case "club_data":
 		loginInfo, tokenSource, sessionKey, err := loginWithCachePolicy(ctx, phone, password, payload, false)
@@ -201,7 +211,7 @@ func handleAction(ctx context.Context, action string, payload credentialsPayload
 			queryDate = time.Now().Format("2006-01-02")
 		}
 		tfInfo, err := api.GetSignInTf(loginInfo.Token, loginInfo.StudentID)
-		if err != nil {
+		if err != nil && isTokenExpiredError(err) {
 			refreshed, refreshedKey, refreshErr := retryWithFreshLogin(ctx, phone, password, loginInfo, payload)
 			if refreshErr == nil {
 				loginInfo = refreshed
@@ -214,14 +224,41 @@ func handleAction(ctx context.Context, action string, payload credentialsPayload
 			return actionResponse{}, http.StatusBadGateway, err
 		}
 		activities, err := api.GetClubActivityList(loginInfo.Token, loginInfo.StudentID, queryDate, loginInfo.SchoolID)
+		if err != nil && isTokenExpiredError(err) {
+			refreshed, refreshedKey, refreshErr := retryWithFreshLogin(ctx, phone, password, loginInfo, payload)
+			if refreshErr == nil {
+				loginInfo = refreshed
+				sessionKey = refreshedKey
+				tokenSource = "relogin"
+				activities, err = api.GetClubActivityList(loginInfo.Token, loginInfo.StudentID, queryDate, loginInfo.SchoolID)
+			}
+		}
 		if err != nil {
 			return actionResponse{}, http.StatusBadGateway, err
 		}
 		joinProgress, err := api.GetClubJoinNum(loginInfo.Token, loginInfo.SchoolID, loginInfo.StudentID)
+		if err != nil && isTokenExpiredError(err) {
+			refreshed, refreshedKey, refreshErr := retryWithFreshLogin(ctx, phone, password, loginInfo, payload)
+			if refreshErr == nil {
+				loginInfo = refreshed
+				sessionKey = refreshedKey
+				tokenSource = "relogin"
+				joinProgress, err = api.GetClubJoinNum(loginInfo.Token, loginInfo.SchoolID, loginInfo.StudentID)
+			}
+		}
 		if err != nil {
 			return actionResponse{}, http.StatusBadGateway, err
 		}
 		topThree, err := api.GetSchoolActivityTopThree(loginInfo.Token)
+		if err != nil && isTokenExpiredError(err) {
+			refreshed, refreshedKey, refreshErr := retryWithFreshLogin(ctx, phone, password, loginInfo, payload)
+			if refreshErr == nil {
+				loginInfo = refreshed
+				sessionKey = refreshedKey
+				tokenSource = "relogin"
+				topThree, err = api.GetSchoolActivityTopThree(loginInfo.Token)
+			}
+		}
 		if err != nil {
 			return actionResponse{}, http.StatusBadGateway, err
 		}
@@ -241,10 +278,28 @@ func handleAction(ctx context.Context, action string, payload credentialsPayload
 			return actionResponse{}, http.StatusUnauthorized, err
 		}
 		runStandard, err := api.GetRunStandard(loginInfo.Token, loginInfo.SchoolID)
+		if err != nil && isTokenExpiredError(err) {
+			refreshed, refreshedKey, refreshErr := retryWithFreshLogin(ctx, phone, password, loginInfo, payload)
+			if refreshErr == nil {
+				loginInfo = refreshed
+				sessionKey = refreshedKey
+				tokenSource = "relogin"
+				runStandard, err = api.GetRunStandard(loginInfo.Token, loginInfo.SchoolID)
+			}
+		}
 		if err != nil {
 			return actionResponse{}, http.StatusBadGateway, err
 		}
 		runInfo, err := api.GetRunInfo(loginInfo.Token, loginInfo.UserID, runStandard.SemesterYear)
+		if err != nil && isTokenExpiredError(err) {
+			refreshed, refreshedKey, refreshErr := retryWithFreshLogin(ctx, phone, password, loginInfo, payload)
+			if refreshErr == nil {
+				loginInfo = refreshed
+				sessionKey = refreshedKey
+				tokenSource = "relogin"
+				runInfo, err = api.GetRunInfo(loginInfo.Token, loginInfo.UserID, runStandard.SemesterYear)
+			}
+		}
 		if err != nil {
 			return actionResponse{}, http.StatusBadGateway, err
 		}
@@ -261,6 +316,15 @@ func handleAction(ctx context.Context, action string, payload credentialsPayload
 			return actionResponse{}, http.StatusUnauthorized, err
 		}
 		joinProgress, err := api.GetClubJoinNum(loginInfo.Token, loginInfo.SchoolID, loginInfo.StudentID)
+		if err != nil && isTokenExpiredError(err) {
+			refreshed, refreshedKey, refreshErr := retryWithFreshLogin(ctx, phone, password, loginInfo, payload)
+			if refreshErr == nil {
+				loginInfo = refreshed
+				sessionKey = refreshedKey
+				tokenSource = "relogin"
+				joinProgress, err = api.GetClubJoinNum(loginInfo.Token, loginInfo.SchoolID, loginInfo.StudentID)
+			}
+		}
 		if err != nil {
 			return actionResponse{}, http.StatusBadGateway, err
 		}
@@ -276,6 +340,15 @@ func handleAction(ctx context.Context, action string, payload credentialsPayload
 			return actionResponse{}, http.StatusUnauthorized, err
 		}
 		topThree, err := api.GetSchoolActivityTopThree(loginInfo.Token)
+		if err != nil && isTokenExpiredError(err) {
+			refreshed, refreshedKey, refreshErr := retryWithFreshLogin(ctx, phone, password, loginInfo, payload)
+			if refreshErr == nil {
+				loginInfo = refreshed
+				sessionKey = refreshedKey
+				tokenSource = "relogin"
+				topThree, err = api.GetSchoolActivityTopThree(loginInfo.Token)
+			}
+		}
 		if err != nil {
 			return actionResponse{}, http.StatusBadGateway, err
 		}
@@ -294,7 +367,7 @@ func handleAction(ctx context.Context, action string, payload credentialsPayload
 			return actionResponse{}, http.StatusUnauthorized, err
 		}
 		rawResp, err := api.JoinClubActivity(loginInfo.Token, loginInfo.StudentID, payload.ActivityID)
-		if err != nil {
+		if err != nil && isTokenExpiredError(err) {
 			refreshed, refreshedKey, refreshErr := retryWithFreshLogin(ctx, phone, password, loginInfo, payload)
 			if refreshErr == nil {
 				loginInfo = refreshed
@@ -321,7 +394,7 @@ func handleAction(ctx context.Context, action string, payload credentialsPayload
 			return actionResponse{}, http.StatusUnauthorized, err
 		}
 		rawResp, err := api.CancelClubActivity(loginInfo.Token, loginInfo.StudentID, payload.ActivityID)
-		if err != nil {
+		if err != nil && isTokenExpiredError(err) {
 			refreshed, refreshedKey, refreshErr := retryWithFreshLogin(ctx, phone, password, loginInfo, payload)
 			if refreshErr == nil {
 				loginInfo = refreshed
@@ -352,9 +425,34 @@ func handleAction(ctx context.Context, action string, payload credentialsPayload
 			"sessionKey": sessionKey,
 		}}, http.StatusOK, nil
 
+	case "store_debug":
+		adminToken := strings.TrimSpace(os.Getenv("ADMIN_TOKEN"))
+		if adminToken == "" || strings.TrimSpace(payload.AdminToken) != adminToken {
+			return actionResponse{}, http.StatusUnauthorized, fmt.Errorf("store_debug 需要有效 adminToken")
+		}
+		store, err := storage.GetStore()
+		if err != nil {
+			return actionResponse{Code: 10000, Msg: "ok", Response: map[string]any{
+				"enabled": false,
+				"error":   err.Error(),
+			}}, http.StatusOK, nil
+		}
+		info := store.Debug(ctx)
+		return actionResponse{Code: 10000, Msg: "ok", Response: info}, http.StatusOK, nil
+
 	default:
 		return actionResponse{Code: 40000, Msg: fmt.Sprintf("不支持的 action: %s", action), Response: map[string]any{}}, http.StatusBadRequest, nil
 	}
+}
+
+func isTokenExpiredError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "登录过期") ||
+		strings.Contains(msg, "请重新登录") ||
+		strings.Contains(msg, "token")
 }
 
 func loginWithCachePolicy(ctx context.Context, phone, password string, payload credentialsPayload, alwaysFresh bool) (api.LoginResult, string, string, error) {
@@ -470,4 +568,113 @@ func loadTrackMap() ([]track.Location, error) {
 		return locations, nil
 	}
 	return nil, fmt.Errorf("读取 map.json 失败: %v", lastErr)
+}
+
+type runSubmissionResult struct {
+	RawResponse string
+	UserID      int64
+	SchoolID    int64
+}
+
+func submitRunWithSession(locations []track.Location, loginInfo api.LoginResult, runDistance int64, runTime int) (runSubmissionResult, error) {
+	runStandard, err := api.GetRunStandard(loginInfo.Token, loginInfo.SchoolID)
+	if err != nil {
+		return runSubmissionResult{}, fmt.Errorf("获取跑步标准失败: %v", err)
+	}
+
+	bounds, err := api.GetSchoolBound(loginInfo.Token, loginInfo.SchoolID)
+	if err != nil {
+		return runSubmissionResult{}, fmt.Errorf("获取学校围栏失败: %v", err)
+	}
+
+	realityTrackPoints := "00.000,00.000--"
+	if len(bounds) > 0 {
+		realityTrackPoints = bounds[0].SiteBound + "--"
+	}
+
+	trackPointsStr := track.Gen(runDistance, locations)
+	recordDate := time.Now().Format("2006-01-02")
+	recordBody := api.NewRecordBody{
+		AppVersions:        appVersion,
+		Brand:              brand,
+		MobileType:         mobileType,
+		SysVersions:        sysVersion,
+		RunDistance:        runDistance,
+		RunTime:            runTime,
+		UserID:             loginInfo.UserID,
+		YearSemester:       runStandard.SemesterYear,
+		RecordDate:         recordDate,
+		RealityTrackPoints: realityTrackPoints,
+		TrackPoints:        trackPointsStr,
+		VocalStatus:        "1",
+		InnerSchool:        "1",
+		DistanceTimeStatus: "1",
+		AgainRunStatus:     "0",
+	}
+
+	result, err := api.RecordNew(loginInfo.Token, recordBody)
+	if err != nil {
+		return runSubmissionResult{}, fmt.Errorf("提交打卡失败: %v", err)
+	}
+
+	return runSubmissionResult{
+		RawResponse: result,
+		UserID:      loginInfo.UserID,
+		SchoolID:    loginInfo.SchoolID,
+	}, nil
+}
+
+func autoClubWithSession(loginInfo api.LoginResult) (api.Response[map[string]any], error) {
+	tfInfo, err := api.GetSignInTf(loginInfo.Token, loginInfo.StudentID)
+	if err != nil {
+		return api.Response[map[string]any]{Code: 50000, Msg: fmt.Sprintf("获取签到信息失败: %v", err)}, err
+	}
+	if tfInfo == nil || isEmptySignInTf(tfInfo) {
+		return api.Response[map[string]any]{Code: 10000, Msg: "没有可签到项目，继续后续流程", Response: map[string]any{}}, nil
+	}
+
+	signType := ""
+	if tfInfo.SignStatus == "1" {
+		signType = "1"
+	} else if tfInfo.SignInStatus == "1" && tfInfo.SignStatus == "2" {
+		signType = "2"
+	} else {
+		return api.Response[map[string]any]{Code: 10000, Msg: "非可签到签退状态，或没有可签到项目", Response: map[string]any{}}, nil
+	}
+
+	_, err = api.SignInOrSignBack(loginInfo.Token, api.SignInOrSignBackBody{
+		ActivityId: tfInfo.ActivityId,
+		Latitude:   tfInfo.Latitude,
+		Longitude:  tfInfo.Longitude,
+		SignType:   signType,
+		StudentId:  loginInfo.StudentID,
+	})
+	if err != nil {
+		return api.Response[map[string]any]{Code: 50000, Msg: fmt.Sprintf("签到/签退失败: %v", err)}, err
+	}
+
+	return api.Response[map[string]any]{
+		Code: 10000,
+		Msg:  "ok",
+		Response: map[string]any{
+			"success":      true,
+			"activityName": tfInfo.ActivityName,
+		},
+	}, nil
+}
+
+func isEmptySignInTf(tfInfo *api.SignInTf) bool {
+	if tfInfo == nil {
+		return true
+	}
+	isZeroStatus := func(v string) bool { return v == "" || v == "0" }
+	return tfInfo.ActivityId == 0 &&
+		tfInfo.ActivityName == "" &&
+		tfInfo.StartTime == "" &&
+		tfInfo.EndTime == "" &&
+		tfInfo.Latitude == "" &&
+		tfInfo.Longitude == "" &&
+		isZeroStatus(tfInfo.SignStatus) &&
+		isZeroStatus(tfInfo.SignInStatus) &&
+		isZeroStatus(tfInfo.SignBackStatus)
 }
