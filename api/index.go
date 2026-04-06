@@ -457,46 +457,54 @@ func isTokenExpiredError(err error) bool {
 
 func loginWithCachePolicy(ctx context.Context, phone, password string, payload credentialsPayload, alwaysFresh bool) (api.LoginResult, string, string, error) {
 	if !alwaysFresh && !payload.ForceRefresh {
+		acceptSession := func(session *storage.Session, source string) (api.LoginResult, string, string, bool) {
+			if session == nil {
+				return api.LoginResult{}, "", "", false
+			}
+			candidate := api.LoginResult{
+				Token:     session.Token,
+				UserID:    session.UserID,
+				StudentID: session.StudentID,
+				SchoolID:  session.SchoolID,
+			}
+			// 只在明确识别为 token 过期时判定不可用，避免网络波动误伤缓存命中。
+			if probeErr := probeSessionToken(candidate); probeErr != nil && isTokenExpiredError(probeErr) {
+				return api.LoginResult{}, "", "", false
+			}
+			return candidate, source, session.SessionKey, true
+		}
+
 		store, err := storage.GetStore()
 		if err == nil && store != nil && store.Enabled() {
 			if strings.TrimSpace(payload.SessionKey) != "" {
 				session, source, loadErr := store.LoadBySessionKey(ctx, payload.SessionKey)
-				if loadErr == nil && session != nil {
-					return api.LoginResult{
-						Token:     session.Token,
-						UserID:    session.UserID,
-						StudentID: session.StudentID,
-						SchoolID:  session.SchoolID,
-					}, source, session.SessionKey, nil
+				if loadErr == nil {
+					if info, src, key, ok := acceptSession(session, source); ok {
+						return info, src, key, nil
+					}
 				}
 			}
 			if payload.StudentID > 0 {
 				session, source, loadErr := store.LoadByStudentID(ctx, payload.StudentID)
-				if loadErr == nil && session != nil {
-					return api.LoginResult{
-						Token:     session.Token,
-						UserID:    session.UserID,
-						StudentID: session.StudentID,
-						SchoolID:  session.SchoolID,
-					}, source, session.SessionKey, nil
+				if loadErr == nil {
+					if info, src, key, ok := acceptSession(session, source); ok {
+						return info, src, key, nil
+					}
 				}
 			}
 			if phone != "" {
 				session, source, loadErr := store.LoadByPhone(ctx, phone)
-				if loadErr == nil && session != nil {
-					return api.LoginResult{
-						Token:     session.Token,
-						UserID:    session.UserID,
-						StudentID: session.StudentID,
-						SchoolID:  session.SchoolID,
-					}, source, session.SessionKey, nil
+				if loadErr == nil {
+					if info, src, key, ok := acceptSession(session, source); ok {
+						return info, src, key, nil
+					}
 				}
 			}
 		}
 	}
 
 	if phone == "" || password == "" {
-		return api.LoginResult{}, "", "", fmt.Errorf("缺少可用登录态，且未提供手机号/密码")
+		return api.LoginResult{}, "", "", fmt.Errorf("缺少可用登录态（或登录态已过期），且未提供手机号/密码")
 	}
 	loginInfo, err := api.Login(phone, password, appVersion, brand, "", deviceType, mobileType, sysVersion)
 	if err != nil {
@@ -504,6 +512,14 @@ func loginWithCachePolicy(ctx context.Context, phone, password string, payload c
 	}
 	sessionKey := persistLogin(ctx, phone, loginInfo, strings.TrimSpace(payload.SessionKey))
 	return loginInfo, "login", sessionKey, nil
+}
+
+func probeSessionToken(loginInfo api.LoginResult) error {
+	if strings.TrimSpace(loginInfo.Token) == "" || loginInfo.StudentID <= 0 {
+		return fmt.Errorf("登录态不完整")
+	}
+	_, err := api.GetSignInTf(loginInfo.Token, loginInfo.StudentID)
+	return err
 }
 
 func retryWithFreshLogin(ctx context.Context, phone, password string, current api.LoginResult, payload credentialsPayload) (api.LoginResult, string, error) {
