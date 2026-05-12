@@ -42,6 +42,16 @@ type Store struct {
 	httpClient      *http.Client
 }
 
+type DebugInfo struct {
+	Enabled         bool   `json:"enabled"`
+	HasPostgres     bool   `json:"hasPostgres"`
+	HasRedis        bool   `json:"hasRedis"`
+	PostgresStatus  string `json:"postgresStatus"`
+	RedisStatus     string `json:"redisStatus"`
+	WriteReadStatus string `json:"writeReadStatus"`
+	Detail          string `json:"detail,omitempty"`
+}
+
 var (
 	globalStore *Store
 	initOnce    sync.Once
@@ -90,16 +100,25 @@ func newStoreFromEnv() (*Store, error) {
 	if postgresURL != "" {
 		db, err := sql.Open("pgx", postgresURL)
 		if err != nil {
-			return nil, fmt.Errorf("打开 Postgres 失败: %w", err)
+			if redisURL == "" || redisToken == "" {
+				return nil, fmt.Errorf("打开 Postgres 失败: %w", err)
+			}
+			return store, nil
 		}
 		if err := db.Ping(); err != nil {
 			_ = db.Close()
-			return nil, fmt.Errorf("连接 Postgres 失败: %w", err)
+			if redisURL == "" || redisToken == "" {
+				return nil, fmt.Errorf("连接 Postgres 失败: %w", err)
+			}
+			return store, nil
 		}
 		store.db = db
 		if err := store.ensureSchema(context.Background()); err != nil {
 			_ = db.Close()
-			return nil, err
+			store.db = nil
+			if redisURL == "" || redisToken == "" {
+				return nil, err
+			}
 		}
 	}
 
@@ -122,6 +141,96 @@ func (s *Store) Enabled() bool {
 	return s.db != nil || (s.redisURL != "" && s.redisToken != "")
 }
 
+func (s *Store) Debug(ctx context.Context) DebugInfo {
+	info := DebugInfo{
+		Enabled:     s != nil && s.Enabled(),
+		HasPostgres: s != nil && s.db != nil,
+		HasRedis:    s != nil && s.redisURL != "" && s.redisToken != "",
+	}
+	if s == nil {
+		info.PostgresStatus = "disabled"
+		info.RedisStatus = "disabled"
+		info.WriteReadStatus = "failed"
+		info.Detail = "store is nil"
+		return info
+	}
+
+	if s.db != nil {
+		pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		err := s.db.PingContext(pingCtx)
+		cancel()
+		if err != nil {
+			info.PostgresStatus = "error"
+			info.Detail = appendDetail(info.Detail, "postgres ping: "+err.Error())
+		} else {
+			info.PostgresStatus = "ok"
+		}
+	} else {
+		info.PostgresStatus = "disabled"
+	}
+
+	if s.redisURL != "" && s.redisToken != "" {
+		key := fmt.Sprintf("session:debug:ping:%d", time.Now().UnixNano())
+		pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		err := s.redisSet(pingCtx, key, "1", 30)
+		cancel()
+		if err != nil {
+			info.RedisStatus = "error"
+			info.Detail = appendDetail(info.Detail, "redis set: "+err.Error())
+		} else {
+			pingCtx2, cancel2 := context.WithTimeout(ctx, 3*time.Second)
+			val, getErr := s.redisGet(pingCtx2, key)
+			cancel2()
+			if getErr != nil {
+				info.RedisStatus = "error"
+				info.Detail = appendDetail(info.Detail, "redis get: "+getErr.Error())
+			} else if val != "1" {
+				info.RedisStatus = "error"
+				info.Detail = appendDetail(info.Detail, "redis roundtrip mismatch")
+			} else {
+				info.RedisStatus = "ok"
+			}
+		}
+	} else {
+		info.RedisStatus = "disabled"
+	}
+
+	testSession := Session{
+		Token:     "debug-token",
+		UserID:    1,
+		StudentID: 99999999,
+		SchoolID:  1,
+		UpdatedAt: time.Now(),
+	}
+	saveCtx, cancelSave := context.WithTimeout(ctx, 5*time.Second)
+	sk, saveErr := s.Save(saveCtx, "13900000000", testSession)
+	cancelSave()
+	if saveErr != nil || strings.TrimSpace(sk) == "" {
+		info.WriteReadStatus = "error"
+		if saveErr != nil {
+			info.Detail = appendDetail(info.Detail, "save: "+saveErr.Error())
+		} else {
+			info.Detail = appendDetail(info.Detail, "save: empty sessionKey")
+		}
+		return info
+	}
+	readCtx, cancelRead := context.WithTimeout(ctx, 5*time.Second)
+	loaded, _, loadErr := s.LoadBySessionKey(readCtx, sk)
+	cancelRead()
+	if loadErr != nil {
+		info.WriteReadStatus = "error"
+		info.Detail = appendDetail(info.Detail, "loadBySessionKey: "+loadErr.Error())
+		return info
+	}
+	if loaded == nil || strings.TrimSpace(loaded.Token) == "" {
+		info.WriteReadStatus = "error"
+		info.Detail = appendDetail(info.Detail, "loadBySessionKey: empty result")
+		return info
+	}
+	info.WriteReadStatus = "ok"
+	return info
+}
+
 func (s *Store) Save(ctx context.Context, phone string, session Session) (string, error) {
 	if session.StudentID <= 0 || session.Token == "" {
 		return "", fmt.Errorf("session 参数不完整")
@@ -138,18 +247,26 @@ func (s *Store) Save(ctx context.Context, phone string, session Session) (string
 	}
 
 	var errs []string
+	saved := false
 	if s.db != nil {
 		if err := s.saveToDB(ctx, session); err != nil {
 			errs = append(errs, err.Error())
+		} else {
+			saved = true
 		}
 	}
 	if s.redisURL != "" && s.redisToken != "" {
 		if err := s.saveToRedis(ctx, session); err != nil {
 			errs = append(errs, err.Error())
+		} else {
+			saved = true
 		}
 	}
 
-	if len(errs) > 0 {
+	if !saved {
+		if len(errs) == 0 {
+			return "", fmt.Errorf("保存 session 失败: 未配置可用存储")
+		}
 		return "", fmt.Errorf("保存 session 失败: %s", strings.Join(errs, "; "))
 	}
 	return session.SessionKey, nil
@@ -245,10 +362,11 @@ CREATE TABLE IF NOT EXISTS user_sessions (
   user_id BIGINT NOT NULL,
   school_id BIGINT NOT NULL,
   token TEXT NOT NULL,
-  session_key TEXT UNIQUE,
+  session_key TEXT,
   phone_hash TEXT,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS session_key TEXT;
 CREATE INDEX IF NOT EXISTS idx_user_sessions_phone_hash ON user_sessions(phone_hash);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_user_sessions_session_key ON user_sessions(session_key);
 `)
@@ -492,4 +610,14 @@ func nullIfEmpty(v string) any {
 		return nil
 	}
 	return v
+}
+
+func appendDetail(base, next string) string {
+	if strings.TrimSpace(next) == "" {
+		return base
+	}
+	if strings.TrimSpace(base) == "" {
+		return next
+	}
+	return base + "; " + next
 }
