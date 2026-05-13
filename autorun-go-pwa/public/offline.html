@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>离线模式</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f2f2f7;
+        --surface: #ffffff;
+        --text: #0b0b0f;
+        --muted: #5b5b66;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #000000;
+          --surface: #1c1c1e;
+          --text: #f5f5f7;
+          --muted: #a1a1aa;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: 'Manrope', 'SF Pro Display', sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+      }
+      .card {
+        max-width: 420px;
+        width: 100%;
+        padding: 28px;
+        border-radius: 24px;
+        background: var(--surface);
+        box-shadow: 0 18px 45px rgba(15, 23, 42, 0.12);
+        text-align: left;
+      }
+      h1 {
+        margin: 16px 0 8px;
+        font-size: 24px;
+      }
+      p {
+        margin: 0;
+        color: var(--muted);
+      }
+      img {
+        width: 72px;
+        height: 72px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <img src="/offline-image.svg" alt="离线" />
+      <h1>当前离线</h1>
+      <p>该页面未缓存，请检查网络连接后重试。</p>
+    </div>
+  </body>
+</html>

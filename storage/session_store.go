@@ -4,24 +4,20 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
-
-	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 const (
-	defaultRedisTTLSeconds = 0
+	defaultDataDirName = "autorun-go"
+	defaultStoreName   = "sessions.json"
 )
 
 type Session struct {
@@ -35,21 +31,22 @@ type Session struct {
 }
 
 type Store struct {
-	db              *sql.DB
-	redisURL        string
-	redisToken      string
-	redisTTLSeconds int
-	httpClient      *http.Client
+	path string
+	mu   sync.Mutex
 }
 
 type DebugInfo struct {
 	Enabled         bool   `json:"enabled"`
-	HasPostgres     bool   `json:"hasPostgres"`
-	HasRedis        bool   `json:"hasRedis"`
-	PostgresStatus  string `json:"postgresStatus"`
-	RedisStatus     string `json:"redisStatus"`
+	Path            string `json:"path,omitempty"`
+	HasLocalFile    bool   `json:"hasLocalFile"`
+	LocalStatus     string `json:"localStatus"`
 	WriteReadStatus string `json:"writeReadStatus"`
 	Detail          string `json:"detail,omitempty"`
+}
+
+type storeFile struct {
+	Sessions  []Session `json:"sessions"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 var (
@@ -66,172 +63,102 @@ func GetStore() (*Store, error) {
 }
 
 func newStoreFromEnv() (*Store, error) {
-	postgresURL := firstNonEmptyEnv(
-		"POSTGRES_URL",
-		"DATABASE_URL",
-		"POSTGRES_DATABASE_URL_UNPOOLED",
-		"POSTGRES_URL_NON_POOLING",
-	)
-	redisURL := firstNonEmptyEnv(
-		"UPSTASH_REDIS_REST_URL",
-		"UPSTASH_REDIS_REST_REDIS_URL",
-		"UPSTASH_REDIS_REST_KV_REST_API_URL",
-		"UPSTASH_REDIS_REST_KV_URL",
-	)
-	redisToken := firstNonEmptyEnv(
-		"UPSTASH_REDIS_REST_TOKEN",
-		"UPSTASH_REDIS_REST_REDIS_TOKEN",
-		"UPSTASH_REDIS_REST_KV_REST_API_TOKEN",
-	)
-
-	if postgresURL == "" && (redisURL == "" || redisToken == "") {
-		return &Store{}, nil
+	path, err := resolveStorePath()
+	if err != nil {
+		return nil, err
 	}
-
-	store := &Store{
-		redisURL:        strings.TrimRight(redisURL, "/"),
-		redisToken:      redisToken,
-		redisTTLSeconds: defaultRedisTTLSeconds,
-		httpClient: &http.Client{
-			Timeout: 6 * time.Second,
-		},
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return nil, fmt.Errorf("初始化本地 session 目录失败: %w", err)
 	}
-
-	if postgresURL != "" {
-		db, err := sql.Open("pgx", postgresURL)
-		if err != nil {
-			if redisURL == "" || redisToken == "" {
-				return nil, fmt.Errorf("打开 Postgres 失败: %w", err)
-			}
-			return store, nil
-		}
-		if err := db.Ping(); err != nil {
-			_ = db.Close()
-			if redisURL == "" || redisToken == "" {
-				return nil, fmt.Errorf("连接 Postgres 失败: %w", err)
-			}
-			return store, nil
-		}
-		store.db = db
-		if err := store.ensureSchema(context.Background()); err != nil {
-			_ = db.Close()
-			store.db = nil
-			if redisURL == "" || redisToken == "" {
-				return nil, err
-			}
-		}
-	}
-
-	return store, nil
+	return &Store{path: path}, nil
 }
 
-func firstNonEmptyEnv(keys ...string) string {
-	for _, key := range keys {
-		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-			return v
-		}
+func resolveStorePath() (string, error) {
+	if configured := strings.TrimSpace(os.Getenv("SESSION_STORE_PATH")); configured != "" {
+		return filepath.Abs(configured)
 	}
-	return ""
+	if dataDir := strings.TrimSpace(os.Getenv("AUTORUN_DATA_DIR")); dataDir != "" {
+		return filepath.Abs(filepath.Join(dataDir, defaultStoreName))
+	}
+	if configDir, err := os.UserConfigDir(); err == nil && strings.TrimSpace(configDir) != "" {
+		return filepath.Join(configDir, defaultDataDirName, defaultStoreName), nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("无法确定本地 session 存储目录: %w", err)
+	}
+	return filepath.Join(cwd, ".autorun", defaultStoreName), nil
 }
 
 func (s *Store) Enabled() bool {
-	if s == nil {
-		return false
-	}
-	return s.db != nil || (s.redisURL != "" && s.redisToken != "")
+	return s != nil && strings.TrimSpace(s.path) != ""
 }
 
 func (s *Store) Debug(ctx context.Context) DebugInfo {
 	info := DebugInfo{
-		Enabled:     s != nil && s.Enabled(),
-		HasPostgres: s != nil && s.db != nil,
-		HasRedis:    s != nil && s.redisURL != "" && s.redisToken != "",
+		Enabled: s != nil && s.Enabled(),
 	}
-	if s == nil {
-		info.PostgresStatus = "disabled"
-		info.RedisStatus = "disabled"
+	if s == nil || !s.Enabled() {
+		info.LocalStatus = "disabled"
 		info.WriteReadStatus = "failed"
-		info.Detail = "store is nil"
+		info.Detail = "store is not configured"
 		return info
 	}
 
-	if s.db != nil {
-		pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		err := s.db.PingContext(pingCtx)
-		cancel()
-		if err != nil {
-			info.PostgresStatus = "error"
-			info.Detail = appendDetail(info.Detail, "postgres ping: "+err.Error())
-		} else {
-			info.PostgresStatus = "ok"
-		}
+	info.Path = s.path
+	if _, err := os.Stat(s.path); err == nil {
+		info.HasLocalFile = true
+	} else if os.IsNotExist(err) {
+		info.HasLocalFile = false
 	} else {
-		info.PostgresStatus = "disabled"
+		info.LocalStatus = "error"
+		info.WriteReadStatus = "failed"
+		info.Detail = err.Error()
+		return info
 	}
 
-	if s.redisURL != "" && s.redisToken != "" {
-		key := fmt.Sprintf("session:debug:ping:%d", time.Now().UnixNano())
-		pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		err := s.redisSet(pingCtx, key, "1", 30)
-		cancel()
-		if err != nil {
-			info.RedisStatus = "error"
-			info.Detail = appendDetail(info.Detail, "redis set: "+err.Error())
-		} else {
-			pingCtx2, cancel2 := context.WithTimeout(ctx, 3*time.Second)
-			val, getErr := s.redisGet(pingCtx2, key)
-			cancel2()
-			if getErr != nil {
-				info.RedisStatus = "error"
-				info.Detail = appendDetail(info.Detail, "redis get: "+getErr.Error())
-			} else if val != "1" {
-				info.RedisStatus = "error"
-				info.Detail = appendDetail(info.Detail, "redis roundtrip mismatch")
-			} else {
-				info.RedisStatus = "ok"
-			}
-		}
-	} else {
-		info.RedisStatus = "disabled"
+	if err := ctxErr(ctx); err != nil {
+		info.LocalStatus = "error"
+		info.WriteReadStatus = "failed"
+		info.Detail = err.Error()
+		return info
 	}
 
-	testSession := Session{
-		Token:     "debug-token",
-		UserID:    1,
-		StudentID: 99999999,
-		SchoolID:  1,
-		UpdatedAt: time.Now(),
-	}
-	saveCtx, cancelSave := context.WithTimeout(ctx, 5*time.Second)
-	sk, saveErr := s.Save(saveCtx, "13900000000", testSession)
-	cancelSave()
-	if saveErr != nil || strings.TrimSpace(sk) == "" {
-		info.WriteReadStatus = "error"
-		if saveErr != nil {
-			info.Detail = appendDetail(info.Detail, "save: "+saveErr.Error())
-		} else {
-			info.Detail = appendDetail(info.Detail, "save: empty sessionKey")
-		}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, err := s.load()
+	if err != nil {
+		info.LocalStatus = "error"
+		info.WriteReadStatus = "failed"
+		info.Detail = err.Error()
 		return info
 	}
-	readCtx, cancelRead := context.WithTimeout(ctx, 5*time.Second)
-	loaded, _, loadErr := s.LoadBySessionKey(readCtx, sk)
-	cancelRead()
-	if loadErr != nil {
+	if err := s.save(data); err != nil {
+		info.LocalStatus = "error"
 		info.WriteReadStatus = "error"
-		info.Detail = appendDetail(info.Detail, "loadBySessionKey: "+loadErr.Error())
+		info.Detail = err.Error()
 		return info
 	}
-	if loaded == nil || strings.TrimSpace(loaded.Token) == "" {
+	if _, err := s.load(); err != nil {
+		info.LocalStatus = "error"
 		info.WriteReadStatus = "error"
-		info.Detail = appendDetail(info.Detail, "loadBySessionKey: empty result")
+		info.Detail = err.Error()
 		return info
 	}
+
+	info.LocalStatus = "ok"
 	info.WriteReadStatus = "ok"
+	if _, err := os.Stat(s.path); err == nil {
+		info.HasLocalFile = true
+	}
 	return info
 }
 
 func (s *Store) Save(ctx context.Context, phone string, session Session) (string, error) {
+	if err := ctxErr(ctx); err != nil {
+		return "", err
+	}
 	if session.StudentID <= 0 || session.Token == "" {
 		return "", fmt.Errorf("session 参数不完整")
 	}
@@ -241,339 +168,207 @@ func (s *Store) Save(ctx context.Context, phone string, session Session) (string
 	if session.UpdatedAt.IsZero() {
 		session.UpdatedAt = time.Now()
 	}
-	phoneHash := hashPhone(phone)
-	if phoneHash != "" {
+	if phoneHash := hashPhone(phone); phoneHash != "" {
 		session.PhoneHash = phoneHash
 	}
 
-	var errs []string
-	saved := false
-	if s.db != nil {
-		if err := s.saveToDB(ctx, session); err != nil {
-			errs = append(errs, err.Error())
-		} else {
-			saved = true
-		}
-	}
-	if s.redisURL != "" && s.redisToken != "" {
-		if err := s.saveToRedis(ctx, session); err != nil {
-			errs = append(errs, err.Error())
-		} else {
-			saved = true
-		}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, err := s.load()
+	if err != nil {
+		return "", err
 	}
 
-	if !saved {
-		if len(errs) == 0 {
-			return "", fmt.Errorf("保存 session 失败: 未配置可用存储")
+	replaced := false
+	for i := range data.Sessions {
+		if data.Sessions[i].StudentID == session.StudentID {
+			data.Sessions[i] = mergeSession(data.Sessions[i], session)
+			replaced = true
+			break
 		}
-		return "", fmt.Errorf("保存 session 失败: %s", strings.Join(errs, "; "))
+	}
+	if !replaced {
+		data.Sessions = append(data.Sessions, session)
+	}
+	data.UpdatedAt = time.Now()
+
+	if err := s.save(data); err != nil {
+		return "", err
 	}
 	return session.SessionKey, nil
 }
 
 func (s *Store) LoadByStudentID(ctx context.Context, studentID int64) (*Session, string, error) {
+	if err := ctxErr(ctx); err != nil {
+		return nil, "", err
+	}
 	if studentID <= 0 {
 		return nil, "", nil
 	}
-	if s.redisURL != "" && s.redisToken != "" {
-		session, err := s.getRedisSessionByStudentID(ctx, studentID)
-		if err == nil && session != nil {
-			return session, "redis", nil
-		}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, err := s.load()
+	if err != nil {
+		return nil, "", err
 	}
-	if s.db != nil {
-		session, err := s.getDBSessionByStudentID(ctx, studentID)
-		if err != nil {
-			return nil, "", err
-		}
-		if session != nil {
-			if s.redisURL != "" && s.redisToken != "" {
-				_ = s.saveToRedis(ctx, *session)
-			}
-			return session, "database", nil
+	for _, session := range data.Sessions {
+		if session.StudentID == studentID {
+			out := session
+			return &out, "local", nil
 		}
 	}
 	return nil, "", nil
 }
 
 func (s *Store) LoadByPhone(ctx context.Context, phone string) (*Session, string, error) {
+	if err := ctxErr(ctx); err != nil {
+		return nil, "", err
+	}
 	phoneHash := hashPhone(phone)
 	if phoneHash == "" {
 		return nil, "", nil
 	}
-	if s.redisURL != "" && s.redisToken != "" {
-		session, err := s.getRedisSessionByPhoneHash(ctx, phoneHash)
-		if err == nil && session != nil {
-			return session, "redis", nil
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, err := s.load()
+	if err != nil {
+		return nil, "", err
+	}
+	var picked *Session
+	for _, session := range data.Sessions {
+		if session.PhoneHash != phoneHash {
+			continue
+		}
+		candidate := session
+		if picked == nil || candidate.UpdatedAt.After(picked.UpdatedAt) {
+			picked = &candidate
 		}
 	}
-	if s.db != nil {
-		session, err := s.getDBSessionByPhoneHash(ctx, phoneHash)
-		if err != nil {
-			return nil, "", err
-		}
-		if session != nil {
-			if s.redisURL != "" && s.redisToken != "" {
-				_ = s.saveToRedis(ctx, *session)
-			}
-			return session, "database", nil
-		}
+	if picked == nil {
+		return nil, "", nil
 	}
-	return nil, "", nil
+	return picked, "local", nil
 }
 
 func (s *Store) LoadBySessionKey(ctx context.Context, sessionKey string) (*Session, string, error) {
+	if err := ctxErr(ctx); err != nil {
+		return nil, "", err
+	}
 	sessionKey = strings.TrimSpace(sessionKey)
 	if sessionKey == "" {
 		return nil, "", nil
 	}
-	if s.redisURL != "" && s.redisToken != "" {
-		session, err := s.getRedisSessionBySessionKey(ctx, sessionKey)
-		if err == nil && session != nil {
-			return session, "redis", nil
-		}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, err := s.load()
+	if err != nil {
+		return nil, "", err
 	}
-	if s.db != nil {
-		session, err := s.getDBSessionBySessionKey(ctx, sessionKey)
-		if err != nil {
-			return nil, "", err
-		}
-		if session != nil {
-			if s.redisURL != "" && s.redisToken != "" {
-				_ = s.saveToRedis(ctx, *session)
-			}
-			return session, "database", nil
+	for _, session := range data.Sessions {
+		if session.SessionKey == sessionKey {
+			out := session
+			return &out, "local", nil
 		}
 	}
 	return nil, "", nil
 }
 
-func (s *Store) ensureSchema(ctx context.Context) error {
-	if s.db == nil {
+func (s *Store) load() (storeFile, error) {
+	if s == nil || !s.Enabled() {
+		return storeFile{}, fmt.Errorf("本地 session 存储未启用")
+	}
+	bytes, err := os.ReadFile(s.path)
+	if os.IsNotExist(err) {
+		return storeFile{Sessions: []Session{}}, nil
+	}
+	if err != nil {
+		return storeFile{}, fmt.Errorf("读取本地 session 失败: %w", err)
+	}
+	if len(bytes) == 0 {
+		return storeFile{Sessions: []Session{}}, nil
+	}
+	var data storeFile
+	if err := json.Unmarshal(bytes, &data); err != nil {
+		return storeFile{}, fmt.Errorf("解析本地 session 失败: %w", err)
+	}
+	if data.Sessions == nil {
+		data.Sessions = []Session{}
+	}
+	return data, nil
+}
+
+func (s *Store) save(data storeFile) error {
+	if s == nil || !s.Enabled() {
+		return fmt.Errorf("本地 session 存储未启用")
+	}
+	if err := os.MkdirAll(filepath.Dir(s.path), 0700); err != nil {
+		return fmt.Errorf("创建本地 session 目录失败: %w", err)
+	}
+	if data.Sessions == nil {
+		data.Sessions = []Session{}
+	}
+	if data.UpdatedAt.IsZero() {
+		data.UpdatedAt = time.Now()
+	}
+
+	bytes, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return fmt.Errorf("序列化本地 session 失败: %w", err)
+	}
+
+	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".sessions-*.tmp")
+	if err != nil {
+		return fmt.Errorf("创建本地 session 临时文件失败: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		_ = os.Remove(tmpPath)
+	}()
+
+	if _, err := tmp.Write(bytes); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("写入本地 session 临时文件失败: %w", err)
+	}
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("设置本地 session 文件权限失败: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("关闭本地 session 临时文件失败: %w", err)
+	}
+	if err := os.Rename(tmpPath, s.path); err != nil {
+		if removeErr := os.Remove(s.path); removeErr != nil && !os.IsNotExist(removeErr) {
+			return fmt.Errorf("替换本地 session 文件失败: %w", removeErr)
+		}
+		if retryErr := os.Rename(tmpPath, s.path); retryErr != nil {
+			return fmt.Errorf("保存本地 session 失败: %w", retryErr)
+		}
+	}
+	return nil
+}
+
+func mergeSession(existing, incoming Session) Session {
+	if incoming.SessionKey == "" {
+		incoming.SessionKey = existing.SessionKey
+	}
+	if incoming.PhoneHash == "" {
+		incoming.PhoneHash = existing.PhoneHash
+	}
+	return incoming
+}
+
+func ctxErr(ctx context.Context) error {
+	if ctx == nil {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
-
-	_, err := s.db.ExecContext(ctx, `
-CREATE TABLE IF NOT EXISTS user_sessions (
-  student_id BIGINT PRIMARY KEY,
-  user_id BIGINT NOT NULL,
-  school_id BIGINT NOT NULL,
-  token TEXT NOT NULL,
-  session_key TEXT,
-  phone_hash TEXT,
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS session_key TEXT;
-CREATE INDEX IF NOT EXISTS idx_user_sessions_phone_hash ON user_sessions(phone_hash);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_user_sessions_session_key ON user_sessions(session_key);
-`)
-	if err != nil {
-		return fmt.Errorf("初始化 user_sessions 表失败: %w", err)
-	}
-	return nil
-}
-
-func (s *Store) saveToDB(ctx context.Context, session Session) error {
-	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
-	_, err := s.db.ExecContext(ctx, `
-INSERT INTO user_sessions (student_id, user_id, school_id, token, session_key, phone_hash, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, NOW())
-ON CONFLICT (student_id) DO UPDATE SET
-  user_id = EXCLUDED.user_id,
-  school_id = EXCLUDED.school_id,
-  token = EXCLUDED.token,
-  session_key = COALESCE(EXCLUDED.session_key, user_sessions.session_key),
-  phone_hash = EXCLUDED.phone_hash,
-  updated_at = NOW()
-`, session.StudentID, session.UserID, session.SchoolID, session.Token, nullIfEmpty(session.SessionKey), nullIfEmpty(session.PhoneHash))
-	if err != nil {
-		return fmt.Errorf("写入 Postgres 失败: %w", err)
-	}
-	return nil
-}
-
-func (s *Store) getDBSessionByStudentID(ctx context.Context, studentID int64) (*Session, error) {
-	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
-	var out Session
-	var phoneHash sql.NullString
-	var sessionKey sql.NullString
-	var updatedAt time.Time
-	err := s.db.QueryRowContext(ctx, `
-SELECT student_id, user_id, school_id, token, session_key, phone_hash, updated_at
-FROM user_sessions
-WHERE student_id = $1
-`, studentID).Scan(&out.StudentID, &out.UserID, &out.SchoolID, &out.Token, &sessionKey, &phoneHash, &updatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("读取 Postgres 失败: %w", err)
-	}
-	out.UpdatedAt = updatedAt
-	if sessionKey.Valid {
-		out.SessionKey = sessionKey.String
-	}
-	if phoneHash.Valid {
-		out.PhoneHash = phoneHash.String
-	}
-	return &out, nil
-}
-
-func (s *Store) getDBSessionByPhoneHash(ctx context.Context, phoneHash string) (*Session, error) {
-	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
-	var out Session
-	var dbPhoneHash sql.NullString
-	var sessionKey sql.NullString
-	var updatedAt time.Time
-	err := s.db.QueryRowContext(ctx, `
-SELECT student_id, user_id, school_id, token, session_key, phone_hash, updated_at
-FROM user_sessions
-WHERE phone_hash = $1
-ORDER BY updated_at DESC
-LIMIT 1
-`, phoneHash).Scan(&out.StudentID, &out.UserID, &out.SchoolID, &out.Token, &sessionKey, &dbPhoneHash, &updatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("读取 Postgres 失败: %w", err)
-	}
-	out.UpdatedAt = updatedAt
-	if sessionKey.Valid {
-		out.SessionKey = sessionKey.String
-	}
-	if dbPhoneHash.Valid {
-		out.PhoneHash = dbPhoneHash.String
-	}
-	return &out, nil
-}
-
-func (s *Store) getDBSessionBySessionKey(ctx context.Context, sessionKey string) (*Session, error) {
-	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
-	var out Session
-	var dbPhoneHash sql.NullString
-	var dbSessionKey sql.NullString
-	var updatedAt time.Time
-	err := s.db.QueryRowContext(ctx, `
-SELECT student_id, user_id, school_id, token, session_key, phone_hash, updated_at
-FROM user_sessions
-WHERE session_key = $1
-`, sessionKey).Scan(&out.StudentID, &out.UserID, &out.SchoolID, &out.Token, &dbSessionKey, &dbPhoneHash, &updatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("读取 Postgres 失败: %w", err)
-	}
-	out.UpdatedAt = updatedAt
-	if dbSessionKey.Valid {
-		out.SessionKey = dbSessionKey.String
-	}
-	if dbPhoneHash.Valid {
-		out.PhoneHash = dbPhoneHash.String
-	}
-	return &out, nil
-}
-
-func (s *Store) saveToRedis(ctx context.Context, session Session) error {
-	valueBytes, _ := json.Marshal(session)
-	value := string(valueBytes)
-
-	studentKey := redisStudentKey(session.StudentID)
-	if err := s.redisSet(ctx, studentKey, value, s.redisTTLSeconds); err != nil {
-		return err
-	}
-	if session.PhoneHash != "" {
-		phoneKey := redisPhoneKey(session.PhoneHash)
-		if err := s.redisSet(ctx, phoneKey, value, s.redisTTLSeconds); err != nil {
-			return err
-		}
-	}
-	if session.SessionKey != "" {
-		sessionKey := redisSessionKey(session.SessionKey)
-		if err := s.redisSet(ctx, sessionKey, value, s.redisTTLSeconds); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (s *Store) getRedisSessionByStudentID(ctx context.Context, studentID int64) (*Session, error) {
-	return s.getRedisSession(ctx, redisStudentKey(studentID))
-}
-
-func (s *Store) getRedisSessionByPhoneHash(ctx context.Context, phoneHash string) (*Session, error) {
-	return s.getRedisSession(ctx, redisPhoneKey(phoneHash))
-}
-
-func (s *Store) getRedisSessionBySessionKey(ctx context.Context, sessionKey string) (*Session, error) {
-	return s.getRedisSession(ctx, redisSessionKey(sessionKey))
-}
-
-func (s *Store) getRedisSession(ctx context.Context, key string) (*Session, error) {
-	raw, err := s.redisGet(ctx, key)
-	if err != nil {
-		return nil, err
-	}
-	if raw == "" {
-		return nil, nil
-	}
-	var out Session
-	if err := json.Unmarshal([]byte(raw), &out); err != nil {
-		return nil, fmt.Errorf("解析 Redis session 失败: %w", err)
-	}
-	return &out, nil
-}
-
-func (s *Store) redisSet(ctx context.Context, key, value string, ttlSeconds int) error {
-	u := fmt.Sprintf("%s/set/%s/%s", s.redisURL, url.PathEscape(key), url.PathEscape(value))
-	if ttlSeconds > 0 {
-		u = fmt.Sprintf("%s?EX=%d", u, ttlSeconds)
-	}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, u, nil)
-	req.Header.Set("Authorization", "Bearer "+s.redisToken)
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("Redis SET 请求失败: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("Redis SET 失败: status=%d body=%s", resp.StatusCode, string(body))
-	}
-	return nil
-}
-
-func (s *Store) redisGet(ctx context.Context, key string) (string, error) {
-	u := fmt.Sprintf("%s/get/%s", s.redisURL, url.PathEscape(key))
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	req.Header.Set("Authorization", "Bearer "+s.redisToken)
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("Redis GET 请求失败: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("Redis GET 失败: status=%d body=%s", resp.StatusCode, string(body))
-	}
-	var payload struct {
-		Result *string `json:"result"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return "", fmt.Errorf("Redis GET 解析失败: %w", err)
-	}
-	if payload.Result == nil {
-		return "", nil
-	}
-	return *payload.Result, nil
+	return ctx.Err()
 }
 
 func hashPhone(phone string) string {
@@ -585,39 +380,10 @@ func hashPhone(phone string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func redisStudentKey(studentID int64) string {
-	return fmt.Sprintf("session:student:%d", studentID)
-}
-
-func redisPhoneKey(phoneHash string) string {
-	return "session:phone:" + phoneHash
-}
-
-func redisSessionKey(sessionKey string) string {
-	return "session:key:" + sessionKey
-}
-
 func generateSessionKey() string {
 	buf := make([]byte, 24)
 	if _, err := rand.Read(buf); err != nil {
 		return fmt.Sprintf("session-%d", time.Now().UnixNano())
 	}
 	return base64.RawURLEncoding.EncodeToString(buf)
-}
-
-func nullIfEmpty(v string) any {
-	if strings.TrimSpace(v) == "" {
-		return nil
-	}
-	return v
-}
-
-func appendDetail(base, next string) string {
-	if strings.TrimSpace(next) == "" {
-		return base
-	}
-	if strings.TrimSpace(base) == "" {
-		return next
-	}
-	return base + "; " + next
 }

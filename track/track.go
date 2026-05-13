@@ -90,7 +90,7 @@ func Gen(distance int64, locations []Location) string {
 	replace := strings.ReplaceAll(currentLocation.Location, ",", "-")
 	result = append(result, fmt.Sprintf("%s-%d-%.1f", replace, startTime, randAccuracy()))
 
-	// 将 result 数组转为 JSON 字符串格式（类似 Java 的 JsonUtils.obj2String）
+	// 将 result 数组转为 JSON 字符串格式
 	return fmt.Sprintf("[\"%s\"]", strings.Join(result, "\",\""))
 }
 

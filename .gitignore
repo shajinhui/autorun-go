@@ -4,3 +4,10 @@
 .vscode/
 main
 main.zip
+release/
+web/
+.autorun/
+autorun-go-pwa/.git/
+autorun-go-pwa/node_modules/
+autorun-go-pwa/dist/
+autorun-go-pwa/tsconfig.tsbuildinfo

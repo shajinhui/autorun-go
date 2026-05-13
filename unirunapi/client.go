@@ -3,12 +3,15 @@ package api
 import (
 	"bytes"
 	"crypto/md5"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
+	"time"
 )
 
 const (
@@ -16,6 +19,18 @@ const (
 	Host      = "https://run-lb.tanmasports.com/"
 	userAgent = "okhttp/3.12.0"
 )
+
+var upstreamHTTPClient = &http.Client{
+	Timeout: 20 * time.Second,
+	Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+		// The upstream WAF can reject Go's default HTTP/2 client fingerprint from
+		// local desktop networks. Keep the transport on HTTP/1.1 for local builds.
+		TLSNextProto: map[string]func(string, *tls.Conn) http.RoundTripper{},
+	},
+}
 
 // ================= 数据结构定义 =================
 
@@ -40,7 +55,33 @@ type SchoolBound struct {
 }
 
 type RunStandard struct {
-	SemesterYear string `json:"semesterYear"`
+	StandardID          int64  `json:"standardId,omitempty"`
+	SchoolID            int64  `json:"schoolId,omitempty"`
+	BoyOnceTimeMin      int64  `json:"boyOnceTimeMin,omitempty"`
+	BoyOnceTimeMax      int64  `json:"boyOnceTimeMax,omitempty"`
+	BoyOnceDistanceMin  int64  `json:"boyOnceDistanceMin,omitempty"`
+	BoyOnceDistanceMax  int64  `json:"boyOnceDistanceMax,omitempty"`
+	BoyAllRunDistance   int64  `json:"boyAllRunDistance,omitempty"`
+	BoyAllRunTime       int64  `json:"boyAllRunTime,omitempty"`
+	GirlOnceTimeMin     int64  `json:"girlOnceTimeMin,omitempty"`
+	GirlOnceTimeMax     int64  `json:"girlOnceTimeMax,omitempty"`
+	GirlOnceDistanceMin int64  `json:"girlOnceDistanceMin,omitempty"`
+	GirlOnceDistanceMax int64  `json:"girlOnceDistanceMax,omitempty"`
+	GirlAllRunDistance  int64  `json:"girlAllRunDistance,omitempty"`
+	GirlAllRunTime      int64  `json:"girlAllRunTime,omitempty"`
+	FirstSemesterStart  string `json:"firstSemesterDateStart,omitempty"`
+	FirstSemesterEnd    string `json:"firstSemesterDateEnd,omitempty"`
+	SecondSemesterStart string `json:"secondSemesterDateStart,omitempty"`
+	SecondSemesterEnd   string `json:"secondSemesterDateEnd,omitempty"`
+	InstanceSemester    string `json:"instanceSemester,omitempty"`
+	SemesterYear        string `json:"semesterYear"`
+	BoyRunSpeed         int64  `json:"boyRunSpeed,omitempty"`
+	GirlRunSpeed        int64  `json:"girlRunSpeed,omitempty"`
+	BoyMaxSpeed         int64  `json:"boyMaxSpeed,omitempty"`
+	BoyMinSpeed         int64  `json:"boyMinSpeed,omitempty"`
+	GirlMaxSpeed        int64  `json:"girlMaxSpeed,omitempty"`
+	GirlMinSpeed        int64  `json:"girlMinSpeed,omitempty"`
+	EffectiveRangeType  string `json:"effectiveRangeType,omitempty"`
 }
 
 type NewRecordBody struct {
@@ -64,6 +105,45 @@ type NewRecordBody struct {
 
 // ================= 核心接口实现 =================
 
+func applyCommonHeaders(req *http.Request, sign, token string) {
+	req.Header.Set("sign", sign)
+	req.Header.Set("appkey", AppKey)
+	req.Header.Set("token", token)
+	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
+	req.Header.Set("User-Agent", userAgent)
+}
+
+func doUpstream(req *http.Request) ([]byte, error) {
+	resp, err := upstreamHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if isHTMLResponse(respBody) {
+		return nil, fmt.Errorf("上游接口返回 HTML 拦截页，可能是本机网络被上游风控拦截")
+	}
+	return respBody, nil
+}
+
+func decodeResponse[T any](respBody []byte, result *Response[T], label string) error {
+	if err := json.Unmarshal(respBody, result); err != nil {
+		return fmt.Errorf("%s: JSON解析失败: %v, raw=%s", label, err, string(respBody))
+	}
+	return nil
+}
+
+func isHTMLResponse(body []byte) bool {
+	trimmed := strings.ToLower(strings.TrimSpace(string(body)))
+	return strings.HasPrefix(trimmed, "<!doctype html") || strings.HasPrefix(trimmed, "<html")
+}
+
 // Login 模拟登录，返回统一对象，避免多返回值错位。
 func Login(phone, password, appVersion, brand, deviceToken, deviceType, mobileType, sysVersion string) (LoginResult, error) {
 	hash := md5.Sum([]byte(password))
@@ -85,24 +165,17 @@ func Login(phone, password, appVersion, brand, deviceToken, deviceType, mobileTy
 	token := "" // 登录时没有 token，签名里这个字段留空
 
 	req, _ := http.NewRequest("POST", Host+"v1/auth/login/password", bytes.NewBuffer(bodyBytes))
-	req.Header.Set("sign", sign)
-	req.Header.Set("appkey", AppKey)
-	req.Header.Set("token", token)
-	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
+	applyCommonHeaders(req, sign, token)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	respBody, err := doUpstream(req)
 	if err != nil {
 		return LoginResult{}, err
 	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
 
 	// 解析泛型 JSON
 	var result Response[UserInfo]
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return LoginResult{}, fmt.Errorf("JSON解析失败: %v\n原始响应: %s", err, string(respBody))
+	if err := decodeResponse(respBody, &result, "登录失败"); err != nil {
+		return LoginResult{}, err
 	}
 
 	if result.Code != 10000 {
@@ -128,22 +201,15 @@ func GetSchoolBound(token string, schoolId int64) ([]SchoolBound, error) {
 
 	apiURL := Host + "v1/unirun/querySchoolBound?schoolId=" + schoolIdStr
 	req, _ := http.NewRequest("GET", apiURL, nil)
-	req.Header.Set("sign", sign)
-	req.Header.Set("token", token)
-	req.Header.Set("appkey", AppKey)
-	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
+	applyCommonHeaders(req, sign, token)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	respBody, err := doUpstream(req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
 
 	var result Response[[]SchoolBound]
-	if err := json.Unmarshal(respBody, &result); err != nil {
+	if err := decodeResponse(respBody, &result, "获取围栏失败"); err != nil {
 		return nil, err
 	}
 
@@ -165,22 +231,15 @@ func GetRunStandard(token string, schoolId int64) (*RunStandard, error) {
 
 	apiURL := Host + "v1/unirun/query/runStandard?schoolId=" + schoolIdStr
 	req, _ := http.NewRequest("GET", apiURL, nil)
-	req.Header.Set("sign", sign)
-	req.Header.Set("token", token)
-	req.Header.Set("appkey", AppKey)
-	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
+	applyCommonHeaders(req, sign, token)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	respBody, err := doUpstream(req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
 
 	var result Response[RunStandard]
-	if err := json.Unmarshal(respBody, &result); err != nil {
+	if err := decodeResponse(respBody, &result, "获取标准失败"); err != nil {
 		return nil, err
 	}
 
@@ -197,24 +256,17 @@ func RecordNew(token string, body NewRecordBody) (string, error) {
 	sign := GenerateSign(nil, string(bodyBytes))
 
 	req, _ := http.NewRequest("POST", Host+"v1/unirun/save/run/record/new", bytes.NewBuffer(bodyBytes))
-	req.Header.Set("sign", sign)
-	req.Header.Set("token", token)
-	req.Header.Set("appkey", AppKey)
-	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
+	applyCommonHeaders(req, sign, token)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	respBody, err := doUpstream(req)
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
 
 	// 校验业务响应码
 	var result Response[map[string]any]
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return "", fmt.Errorf("响应解析失败: %v, raw=%s", err, string(respBody))
+	if err := decodeResponse(respBody, &result, "提交失败"); err != nil {
+		return "", err
 	}
 	if result.Code != 10000 {
 		return "", fmt.Errorf("提交失败: %s", result.Msg)
@@ -223,7 +275,7 @@ func RecordNew(token string, body NewRecordBody) (string, error) {
 	return string(respBody), nil
 }
 
-// GetSignInTf 获取签到坐标与状态 (对应 Request.java 的 getSignInTf)
+// GetSignInTf 获取签到坐标与状态
 func GetSignInTf(token string, studentId int64) (*SignInTf, error) {
 	studentIdStr := strconv.FormatInt(studentId, 10)
 	params := map[string]string{
@@ -233,22 +285,14 @@ func GetSignInTf(token string, studentId int64) (*SignInTf, error) {
 
 	apiURL := Host + "v1/clubactivity/getSignInTf?studentId=" + studentIdStr
 	req, _ := http.NewRequest("GET", apiURL, nil)
-	req.Header.Set("sign", sign)
-	req.Header.Set("token", token)
-	req.Header.Set("appkey", AppKey)
-	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
-	// req.Header.Set("User-Agent", UserAgent)
+	applyCommonHeaders(req, sign, token)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	respBody, err := doUpstream(req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
 	var result Response[SignInTf]
-	if err := json.Unmarshal(respBody, &result); err != nil {
+	if err := decodeResponse(respBody, &result, "获取签到信息失败"); err != nil {
 		return nil, err
 	}
 	if result.Code != 10000 {
@@ -257,28 +301,20 @@ func GetSignInTf(token string, studentId int64) (*SignInTf, error) {
 	return &result.Response, nil
 }
 
-// SignInOrSignBack 提交签到/签退 (对应 Request.java 的 signInOrSignBack)
+// SignInOrSignBack 提交签到/签退
 func SignInOrSignBack(token string, body SignInOrSignBackBody) (string, error) {
 	bodyBytes, _ := json.Marshal(body)
 	sign := GenerateSign(nil, string(bodyBytes)) // POST 请求，将 Body 进行签名
 
 	req, _ := http.NewRequest("POST", Host+"v1/clubactivity/signInOrSignBack", bytes.NewBuffer(bodyBytes))
-	req.Header.Set("sign", sign)
-	req.Header.Set("token", token)
-	req.Header.Set("appkey", AppKey)
-	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
-	req.Header.Set("User-Agent", userAgent)
+	applyCommonHeaders(req, sign, token)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	respBody, err := doUpstream(req)
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
 	var result Response[map[string]any]
-	if err := json.Unmarshal(respBody, &result); err != nil {
+	if err := decodeResponse(respBody, &result, "签到/签退失败"); err != nil {
 		return "", err
 	}
 	if result.Code != 10000 {
@@ -287,7 +323,7 @@ func SignInOrSignBack(token string, body SignInOrSignBackBody) (string, error) {
 	return string(respBody), nil
 }
 
-// GetClubActivityList 获取活动列表 (对应 Request.java 的 getActivityList)
+// GetClubActivityList 获取活动列表
 func GetClubActivityList(token string, studentId int64, date string, schoolId int64) ([]ClubInfo, error) {
 	studentIdStr := strconv.FormatInt(studentId, 10)
 	schoolIdStr := strconv.FormatInt(schoolId, 10)
@@ -305,22 +341,14 @@ func GetClubActivityList(token string, studentId int64, date string, schoolId in
 		"&studentId=" + studentIdStr + "&schoolId=" + schoolIdStr + "&pageNo=1&pageSize=15"
 
 	req, _ := http.NewRequest("GET", apiURL, nil)
-	req.Header.Set("sign", sign)
-	req.Header.Set("token", token)
-	req.Header.Set("appkey", AppKey)
-	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
-	req.Header.Set("User-Agent", userAgent)
+	applyCommonHeaders(req, sign, token)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	respBody, err := doUpstream(req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
 	var result Response[[]ClubInfo]
-	if err := json.Unmarshal(respBody, &result); err != nil {
+	if err := decodeResponse(respBody, &result, "查询活动失败"); err != nil {
 		return nil, err
 	}
 	if result.Code != 10000 {
@@ -342,22 +370,14 @@ func JoinClubActivity(token string, studentId int64, activityId int64) (string, 
 
 	apiURL := Host + "v1/clubactivity/joinClubActivity?studentId=" + studentIdStr + "&activityId=" + activityIdStr
 	req, _ := http.NewRequest("GET", apiURL, nil)
-	req.Header.Set("sign", sign)
-	req.Header.Set("token", token)
-	req.Header.Set("appkey", AppKey)
-	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
-	req.Header.Set("User-Agent", userAgent)
+	applyCommonHeaders(req, sign, token)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	respBody, err := doUpstream(req)
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
 	var result Response[map[string]any]
-	if err := json.Unmarshal(respBody, &result); err != nil {
+	if err := decodeResponse(respBody, &result, "加入俱乐部失败"); err != nil {
 		return "", err
 	}
 	if result.Code != 10000 {
@@ -379,22 +399,14 @@ func CancelClubActivity(token string, studentId int64, activityId int64) (string
 
 	apiURL := Host + "v1/clubactivity/cancelActivity?studentId=" + studentIdStr + "&activityId=" + activityIdStr
 	req, _ := http.NewRequest("GET", apiURL, nil)
-	req.Header.Set("sign", sign)
-	req.Header.Set("token", token)
-	req.Header.Set("appkey", AppKey)
-	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
-	req.Header.Set("User-Agent", userAgent)
+	applyCommonHeaders(req, sign, token)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	respBody, err := doUpstream(req)
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
 	var result Response[any]
-	if err := json.Unmarshal(respBody, &result); err != nil {
+	if err := decodeResponse(respBody, &result, "取消报名失败"); err != nil {
 		return "", err
 	}
 	if result.Code != 10000 {
@@ -414,22 +426,14 @@ func GetRunInfo(token string, userId int64, yearSemester string) (*RunInfo, erro
 
 	apiURL := Host + "v1/unirun/query/runInfo?userId=" + userIdStr + "&yearSemester=" + url.QueryEscape(yearSemester)
 	req, _ := http.NewRequest("GET", apiURL, nil)
-	req.Header.Set("sign", sign)
-	req.Header.Set("token", token)
-	req.Header.Set("appkey", AppKey)
-	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
-	req.Header.Set("User-Agent", userAgent)
+	applyCommonHeaders(req, sign, token)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	respBody, err := doUpstream(req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
 	var result Response[RunInfo]
-	if err := json.Unmarshal(respBody, &result); err != nil {
+	if err := decodeResponse(respBody, &result, "查询跑步信息失败"); err != nil {
 		return nil, err
 	}
 	if result.Code != 10000 {
@@ -450,22 +454,14 @@ func GetClubJoinNum(token string, schoolId int64, studentId int64) (*ClubJoinNum
 
 	apiURL := Host + "v1/clubactivity/getJoinNum?schoolId=" + schoolIdStr + "&studentId=" + studentIdStr
 	req, _ := http.NewRequest("GET", apiURL, nil)
-	req.Header.Set("sign", sign)
-	req.Header.Set("token", token)
-	req.Header.Set("appkey", AppKey)
-	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
-	req.Header.Set("User-Agent", userAgent)
+	applyCommonHeaders(req, sign, token)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	respBody, err := doUpstream(req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
 	var result Response[ClubJoinNum]
-	if err := json.Unmarshal(respBody, &result); err != nil {
+	if err := decodeResponse(respBody, &result, "查询俱乐部参与进度失败"); err != nil {
 		return nil, err
 	}
 	if result.Code != 10000 {
@@ -480,22 +476,14 @@ func GetSchoolActivityTopThree(token string) ([]ClubTopActivity, error) {
 
 	apiURL := Host + "v1/clubactivity/querySchoolActivityTopThree"
 	req, _ := http.NewRequest("GET", apiURL, nil)
-	req.Header.Set("sign", sign)
-	req.Header.Set("token", token)
-	req.Header.Set("appkey", AppKey)
-	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
-	req.Header.Set("User-Agent", userAgent)
+	applyCommonHeaders(req, sign, token)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	respBody, err := doUpstream(req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
 	var result Response[[]ClubTopActivity]
-	if err := json.Unmarshal(respBody, &result); err != nil {
+	if err := decodeResponse(respBody, &result, "查询俱乐部推荐活动失败"); err != nil {
 		return nil, err
 	}
 	if result.Code != 10000 {

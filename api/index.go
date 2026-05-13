@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -37,6 +38,10 @@ type credentialsPayload struct {
 	ActivityID   int64  `json:"activityId"`
 	StudentID    int64  `json:"studentId"`
 	ForceRefresh bool   `json:"forceRefresh"`
+	Enabled      bool   `json:"enabled"`
+	SignType     string `json:"signType"`
+	ClientID     string `json:"clientId"`
+	Event        string `json:"event"`
 }
 
 type actionResponse struct {
@@ -72,6 +77,10 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	action := strings.ToLower(strings.TrimSpace(payload.Action))
 	if action == "" {
 		action = "run"
+	}
+	if action == "app_lifecycle" && !isAllowedLocalLifecycleOrigin(r) {
+		writeJSON(w, http.StatusForbidden, actionResponse{Code: 40300, Msg: "forbidden origin", Response: map[string]any{}})
+		return
 	}
 
 	phone, password, err := resolveCredentials(payload, action)
@@ -130,6 +139,10 @@ func resolveCredentials(payload credentialsPayload, action string) (string, stri
 
 func handleAction(ctx context.Context, action string, payload credentialsPayload, phone, password string) (actionResponse, int, error) {
 	switch action {
+	case "app_lifecycle":
+		state := HandleAppLifecycle(payload.ClientID, payload.Event)
+		return actionResponse{Code: 10000, Msg: "ok", Response: state}, http.StatusOK, nil
+
 	case "login":
 		loginInfo, tokenSource, sessionKey, err := loginWithCachePolicy(ctx, phone, password, payload, true)
 		if err != nil {
@@ -188,6 +201,32 @@ func handleAction(ctx context.Context, action string, payload credentialsPayload
 				sessionKey = refreshedKey
 				tokenSource = "relogin"
 				res, err = autoClubWithSession(loginInfo)
+			}
+		}
+		if err != nil {
+			return actionResponse{}, http.StatusBadGateway, err
+		}
+		body := res.Response
+		if body == nil {
+			body = map[string]any{}
+		}
+		body["tokenSrc"] = tokenSource
+		body["sessionKey"] = sessionKey
+		return actionResponse{Code: res.Code, Msg: res.Msg, Response: body}, http.StatusOK, nil
+
+	case "club_sign":
+		loginInfo, tokenSource, sessionKey, err := loginWithCachePolicy(ctx, phone, password, payload, false)
+		if err != nil {
+			return actionResponse{}, http.StatusUnauthorized, err
+		}
+		res, err := clubSignWithSession(loginInfo, payload.SignType)
+		if err != nil && isTokenExpiredError(err) {
+			refreshed, refreshedKey, refreshErr := retryWithFreshLogin(ctx, phone, password, loginInfo, payload)
+			if refreshErr == nil {
+				loginInfo = refreshed
+				sessionKey = refreshedKey
+				tokenSource = "relogin"
+				res, err = clubSignWithSession(loginInfo, payload.SignType)
 			}
 		}
 		if err != nil {
@@ -268,8 +307,39 @@ func handleAction(ctx context.Context, action string, payload credentialsPayload
 			"activities":   activities,
 			"joinProgress": joinProgress,
 			"topThree":     topThree,
+			"schedule":     loadClubSchedulePublic(loginInfo.StudentID),
 			"tokenSrc":     tokenSource,
 			"sessionKey":   sessionKey,
+		}}, http.StatusOK, nil
+
+	case "club_schedule_get":
+		loginInfo, tokenSource, sessionKey, err := loginWithCachePolicy(ctx, phone, password, payload, false)
+		if err != nil {
+			return actionResponse{}, http.StatusUnauthorized, err
+		}
+		return actionResponse{Code: 10000, Msg: "ok", Response: map[string]any{
+			"schedule":   loadClubSchedulePublic(loginInfo.StudentID),
+			"tokenSrc":   tokenSource,
+			"sessionKey": sessionKey,
+		}}, http.StatusOK, nil
+
+	case "club_schedule_set":
+		loginInfo, tokenSource, sessionKey, err := loginWithCachePolicy(ctx, phone, password, payload, false)
+		if err != nil {
+			return actionResponse{}, http.StatusUnauthorized, err
+		}
+		schedule, err := saveClubSchedule(ctx, loginInfo, sessionKey, payload.Enabled)
+		if err != nil {
+			return actionResponse{}, http.StatusInternalServerError, err
+		}
+		stateText := "已关闭俱乐部定时"
+		if payload.Enabled {
+			stateText = "已开启俱乐部定时"
+		}
+		return actionResponse{Code: 10000, Msg: stateText, Response: map[string]any{
+			"schedule":   schedule,
+			"tokenSrc":   tokenSource,
+			"sessionKey": sessionKey,
 		}}, http.StatusOK, nil
 
 	case "run_info":
@@ -443,6 +513,19 @@ func handleAction(ctx context.Context, action string, payload credentialsPayload
 	default:
 		return actionResponse{Code: 40000, Msg: fmt.Sprintf("不支持的 action: %s", action), Response: map[string]any{}}, http.StatusBadRequest, nil
 	}
+}
+
+func isAllowedLocalLifecycleOrigin(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 func isTokenExpiredError(err error) bool {
@@ -641,24 +724,48 @@ func submitRunWithSession(locations []track.Location, loginInfo api.LoginResult,
 }
 
 func autoClubWithSession(loginInfo api.LoginResult) (api.Response[map[string]any], error) {
+	return clubSignWithSession(loginInfo, "")
+}
+
+func clubSignWithSession(loginInfo api.LoginResult, requestedSignType string) (api.Response[map[string]any], error) {
 	tfInfo, err := api.GetSignInTf(loginInfo.Token, loginInfo.StudentID)
 	if err != nil {
 		return api.Response[map[string]any]{Code: 50000, Msg: fmt.Sprintf("获取签到信息失败: %v", err)}, err
 	}
 	if tfInfo == nil || isEmptySignInTf(tfInfo) {
-		return api.Response[map[string]any]{Code: 10000, Msg: "没有可签到项目，继续后续流程", Response: map[string]any{}}, nil
+		return api.Response[map[string]any]{Code: 10000, Msg: "没有可签到项目，继续后续流程", Response: map[string]any{
+			"success":  false,
+			"signTask": tfInfo,
+		}}, nil
 	}
 
-	signType := ""
-	if tfInfo.SignStatus == "1" {
-		signType = "1"
-	} else if tfInfo.SignInStatus == "1" && tfInfo.SignStatus == "2" {
-		signType = "2"
-	} else {
-		return api.Response[map[string]any]{Code: 10000, Msg: "非可签到签退状态，或没有可签到项目", Response: map[string]any{}}, nil
+	signType := resolveClubSignType(tfInfo)
+	if requested := strings.TrimSpace(requestedSignType); requested != "" {
+		if requested != "1" && requested != "2" {
+			return api.Response[map[string]any]{Code: 40000, Msg: "signType 只能是 1 或 2", Response: map[string]any{
+				"success":  false,
+				"signTask": tfInfo,
+			}}, nil
+		}
+		if requested != signType {
+			return api.Response[map[string]any]{Code: 10000, Msg: "当前还不能执行该签到/签退操作", Response: map[string]any{
+				"success":      false,
+				"activityName": tfInfo.ActivityName,
+				"signTask":     tfInfo,
+				"nextSignType": signType,
+			}}, nil
+		}
+		signType = requested
+	}
+	if signType == "" {
+		return api.Response[map[string]any]{Code: 10000, Msg: "非可签到签退状态，或没有可签到项目", Response: map[string]any{
+			"success":      false,
+			"activityName": tfInfo.ActivityName,
+			"signTask":     tfInfo,
+		}}, nil
 	}
 
-	_, err = api.SignInOrSignBack(loginInfo.Token, api.SignInOrSignBackBody{
+	rawResp, err := api.SignInOrSignBack(loginInfo.Token, api.SignInOrSignBackBody{
 		ActivityId: tfInfo.ActivityId,
 		Latitude:   tfInfo.Latitude,
 		Longitude:  tfInfo.Longitude,
@@ -675,8 +782,24 @@ func autoClubWithSession(loginInfo api.LoginResult) (api.Response[map[string]any
 		Response: map[string]any{
 			"success":      true,
 			"activityName": tfInfo.ActivityName,
+			"rawResponse":  rawResp,
+			"signTask":     tfInfo,
+			"signType":     signType,
 		},
 	}, nil
+}
+
+func resolveClubSignType(tfInfo *api.SignInTf) string {
+	if tfInfo == nil {
+		return ""
+	}
+	if tfInfo.SignStatus == "1" {
+		return "1"
+	}
+	if tfInfo.SignInStatus == "1" && tfInfo.SignStatus == "2" {
+		return "2"
+	}
+	return ""
 }
 
 func isEmptySignInTf(tfInfo *api.SignInTf) bool {

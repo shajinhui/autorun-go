@@ -1,5 +1,7 @@
 # 部署 `autorun-go` 到 Vercel
 
+> 当前项目已改成本地版优先。登录态缓存使用本地 JSON 文件，适合桌面/本机运行；Vercel 这类无服务器环境的本地文件不保证持久化，因此不再作为推荐部署方式。
+
 ## 1. 在 Vercel 中设置项目
 
 - 将此仓库导入到 Vercel。
@@ -17,16 +19,13 @@
 - `RUN_PHONE`
 - `RUN_PASSWORD`
 - `ADMIN_TOKEN`（可选但推荐）
-- `POSTGRES_URL`（或 `DATABASE_URL`）用于长期令牌存储
-- `UPSTASH_REDIS_REST_URL` 用于 Redis 缓存
-- `UPSTASH_REDIS_REST_TOKEN` 用于 Redis 认证
+- `AUTORUN_DATA_DIR`（可选）用于指定本地 session 数据目录
+- `SESSION_STORE_PATH`（可选）用于指定本地 session JSON 文件路径
 
 使用模式：
 - 普通用户：在请求体中发送 `phone` + `password`。
 - 管理员模式：发送 `adminToken`；后端将使用 `RUN_PHONE`/`RUN_PASSWORD`。
-- 如果配置了 `POSTGRES_URL` + Redis 环境变量：
-  - 登录将令牌写入 Postgres（持久化）和 Redis（缓存）
-  - 后续请求先读 Redis，然后回退到 Postgres
+- 登录态默认写入本地 JSON 文件；不再需要 Postgres 或 Redis。
 
 ## 3. API 端点
 
@@ -70,4 +69,4 @@
 
 - `map.json` 通过 `vercel.json` `includeFiles` 包含在 Go 函数运行时中。
 - CORS 被启用为 `*` 以便于 PWA/API 集成。
-- 响应中的 `tokenSrc` 标记令牌来源：`redis` / `database` / `login` / `relogin`。
+- 响应中的 `tokenSrc` 标记令牌来源：`local` / `login` / `relogin`。

@@ -13,7 +13,7 @@ const (
 	AppSecret = "56E39A1658455588885690425C0FD16055A21676"
 )
 
-// GenerateSign 完美复刻原 Java 的 SignUtils.get
+// GenerateSign 生成签名
 func GenerateSign(query map[string]string, body string) string {
 	var sb strings.Builder
 
@@ -23,7 +23,7 @@ func GenerateSign(query map[string]string, body string) string {
 		for k := range query {
 			keys = append(keys, k)
 		}
-		sort.Strings(keys) // 对应 Java 的 TreeSet 自然排序
+		sort.Strings(keys) // 自然排序
 
 		for _, k := range keys {
 			v := query[k]
@@ -44,7 +44,7 @@ func GenerateSign(query map[string]string, body string) string {
 	}
 
 	rawStr := sb.String()
-	hasReplaced := false // 对应 Java 里的 z2
+	hasReplaced := false
 
 	// 4. 检查并删除导致异常的特殊字符
 	charsToRemove := []string{" ", "~", "!", "(", ")", "'"}
@@ -60,12 +60,9 @@ func GenerateSign(query map[string]string, body string) string {
 	// 5. 根据是否发生过替换，走不同的 MD5 逻辑
 	if hasReplaced {
 		// URL 编码
-		// 注意：Go 的 url.QueryEscape 会把 '*' 转码为 '%2A'，
-		// 而 Java 的 URLEncoder.encode 默认保留 '*'。为了追求 100% 一致，手动将其替换回 '*'
+		// 注意：url.QueryEscape 会把 '*' 转码为 '%2A'，这里需要保留 '*'，手动将其替换回 '*'
 		encodedStr := url.QueryEscape(rawStr)
 		encodedStr = strings.ReplaceAll(encodedStr, "%2A", "*")
-
-		// Java 的 URLEncoder 会把空格转为 '+'，但因为前一步空格已经被删了，所以无需处理空格差异
 
 		// 计算 MD5 并转大写
 		hash := md5.Sum([]byte(encodedStr))
