@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>离线模式</title>
+    <title>本地服务未启动</title>
     <style>
       :root {
         color-scheme: light dark;
@@ -47,6 +47,20 @@
       p {
         margin: 0;
         color: var(--muted);
+        line-height: 1.6;
+      }
+      .steps {
+        margin-top: 18px;
+        padding: 14px;
+        border-radius: 16px;
+        background: rgba(10, 132, 255, 0.08);
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.7;
+      }
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        color: var(--text);
       }
       img {
         width: 72px;
@@ -56,9 +70,12 @@
   </head>
   <body>
     <div class="card">
-      <img src="/offline-image.svg" alt="离线" />
-      <h1>当前离线</h1>
-      <p>该页面未缓存，请检查网络连接后重试。</p>
+      <img src="/offline-image.svg" alt="本地服务未启动" />
+      <h1>本地服务未启动</h1>
+      <p>如果你是从 Windows 的 PWA 图标打开 AutoRun，浏览器应用本身不能拉起后端服务。</p>
+      <div class="steps">
+        请回到解压后的 AutoRun 文件夹，双击 <code>start-autorun.bat</code> 或 <code>autorun.exe</code> 启动。服务启动后页面会自动打开。
+      </div>
     </div>
   </body>
 </html>

@@ -521,6 +521,37 @@ button:active {
   z-index: 10;
 }
 
+.backend-offline-banner {
+  position: fixed;
+  left: 50%;
+  top: 18px;
+  transform: translateX(-50%);
+  z-index: 80;
+  width: min(520px, calc(100vw - 28px));
+  padding: 16px;
+  border-radius: var(--radius-md);
+  display: grid;
+  gap: 12px;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid rgba(255, 77, 79, 0.24);
+  box-shadow: var(--shadow);
+}
+
+.backend-offline-banner h2 {
+  margin: 0;
+  color: #b42318;
+  font-size: 17px;
+  font-weight: 800;
+}
+
+.backend-offline-banner p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
 .toast-stack {
   position: fixed;
   top: 18px;

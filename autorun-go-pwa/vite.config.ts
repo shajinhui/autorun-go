@@ -25,12 +25,14 @@ export default defineConfig({
         globPatterns: ['**/*.{js,css,html,ico,png,svg,webmanifest}']
       },
       manifest: {
-        name: 'Autorun PWA',
+        name: 'AutoRun 本地版',
         short_name: 'Autorun',
-        description: 'SwiftUI-style dashboard with offline support',
+        description: '需要先启动本地 AutoRun 后端服务',
         theme_color: '#0A84FF',
         background_color: '#F2F2F7',
         display: 'standalone',
+        start_url: '/',
+        scope: '/',
         icons: [
           {
             src: 'icon.svg',

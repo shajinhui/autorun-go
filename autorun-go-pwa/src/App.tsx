@@ -324,9 +324,20 @@ const createAppClientId = (): string => {
   return `client-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
-const sendAppLifecycle = (clientId: string, event: 'open' | 'heartbeat' | 'close', keepalive = false) => {
+const isWindowsPlatform = (): boolean => {
+  if (typeof navigator === 'undefined') {
+    return false
+  }
+  return /windows/i.test(navigator.userAgent)
+}
+
+const sendAppLifecycle = async (
+  clientId: string,
+  event: 'open' | 'heartbeat' | 'close',
+  keepalive = false
+): Promise<boolean> => {
   if (typeof window === 'undefined') {
-    return
+    return false
   }
   const payload = JSON.stringify({
     action: 'app_lifecycle',
@@ -337,15 +348,20 @@ const sendAppLifecycle = (clientId: string, event: 'open' | 'heartbeat' | 'close
   if (keepalive && typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
     const sent = navigator.sendBeacon(endpoint, new Blob([payload], { type: 'application/json' }))
     if (sent) {
-      return
+      return true
     }
   }
-  void fetch(endpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: payload,
-    keepalive
-  }).catch(() => {})
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: payload,
+      keepalive
+    })
+    return response.ok
+  } catch {
+    return false
+  }
 }
 
 export default function App() {
@@ -388,6 +404,7 @@ export default function App() {
   const [loginError, setLoginError] = useState('')
   const [installPromptEvent, setInstallPromptEvent] = useState<BeforeInstallPromptEvent | null>(null)
   const [canInstall, setCanInstall] = useState(false)
+  const [backendAvailable, setBackendAvailable] = useState(true)
 
   useEffect(() => {
     const update = registerSW({
@@ -404,16 +421,25 @@ export default function App() {
 
   useEffect(() => {
     const clientId = appClientIdRef.current
-    sendAppLifecycle(clientId, 'open')
+    let disposed = false
+    const notifyAlive = async (event: 'open' | 'heartbeat') => {
+      const ok = await sendAppLifecycle(clientId, event)
+      if (!disposed) {
+        setBackendAvailable(ok)
+      }
+    }
+
+    void notifyAlive('open')
     const heartbeatTimer = window.setInterval(() => {
-      sendAppLifecycle(clientId, 'heartbeat')
+      void notifyAlive('heartbeat')
     }, APP_LIFECYCLE_HEARTBEAT_MS)
     const notifyClose = () => {
-      sendAppLifecycle(clientId, 'close', true)
+      void sendAppLifecycle(clientId, 'close', true)
     }
 
     window.addEventListener('pagehide', notifyClose)
     return () => {
+      disposed = true
       window.clearInterval(heartbeatTimer)
       window.removeEventListener('pagehide', notifyClose)
       notifyClose()
@@ -454,11 +480,18 @@ export default function App() {
     }
     try {
     const endpoint = getApiEndpoint()
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    })
+    let response: Response
+    try {
+      response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+      setBackendAvailable(true)
+    } catch (err) {
+      setBackendAvailable(false)
+      throw err
+    }
     const rawText = await response.text().catch(() => '')
     if (isHTMLResponse(rawText)) {
       throw new Error('请求没有进入后端 API，请确认从 AutoRun 启动入口打开页面')
@@ -755,7 +788,12 @@ export default function App() {
     const isStandalone =
       typeof window !== 'undefined' &&
       (window.matchMedia('(display-mode: standalone)').matches ||
-        ((window.navigator as Navigator & { standalone?: boolean }).standalone === true))
+	        ((window.navigator as Navigator & { standalone?: boolean }).standalone === true))
+
+    if (isWindowsPlatform()) {
+      pushToast('Windows 请从解压目录双击 start-autorun.bat 启动，PWA 图标不能拉起后端', 'error')
+      return
+    }
 
     if (isIOS && !isStandalone) {
       pushToast('iPhone请点“分享”后选择“添加到主屏幕”', 'success')
@@ -1039,9 +1077,30 @@ export default function App() {
       : signBackCountdownMs > 0
         ? `距签退窗口 ${formatCountdown(signBackCountdownMs)}`
         : '已进入签退试探窗口'
+  const windowsPlatform = isWindowsPlatform()
 
   return (
     <div className="app">
+      {!backendAvailable && (
+        <div className="backend-offline-banner glass" role="alert">
+          <div>
+            <h2>本地服务未启动</h2>
+            <p>如果你是从 Windows 的 PWA 图标打开，浏览器应用不能拉起后端。</p>
+            <p>请回到解压后的 AutoRun 文件夹，双击 start-autorun.bat 或 autorun.exe 启动。</p>
+          </div>
+          <button
+            className="primary"
+            type="button"
+            onClick={() => {
+              setBackendAvailable(true)
+              void sendAppLifecycle(appClientIdRef.current, 'heartbeat').then(setBackendAvailable)
+            }}
+          >
+            重新检测
+          </button>
+        </div>
+      )}
+
       {toasts.length > 0 && (
         <div className="toast-stack" role="status" aria-live="polite">
           {toasts.map((toast) => (
@@ -1317,7 +1376,7 @@ export default function App() {
               <p>账号信息仅用于当前会话请求，不会在前端持久化。</p>
             </div>
             <button className="primary install-btn" onClick={() => void handleInstallApp()}>
-              安装应用
+              {windowsPlatform ? '查看启动说明' : '安装应用'}
             </button>
             {renderCredentials()}
             
@@ -1370,7 +1429,7 @@ export default function App() {
         </div>
       )}
 
-      {canInstall && activeTab !== 'mine' && (
+      {canInstall && activeTab !== 'mine' && !windowsPlatform && (
         <button className="install-fab" onClick={() => void handleInstallApp()}>
           安装应用
         </button>

@@ -2,7 +2,7 @@
 
 import { cleanupOutdatedCaches, precacheAndRoute, matchPrecache } from 'workbox-precaching'
 import { registerRoute, setCatchHandler } from 'workbox-routing'
-import { CacheFirst, NetworkFirst, StaleWhileRevalidate } from 'workbox-strategies'
+import { CacheFirst, NetworkFirst, NetworkOnly, StaleWhileRevalidate } from 'workbox-strategies'
 import { ExpirationPlugin } from 'workbox-expiration'
 import { CacheableResponsePlugin } from 'workbox-cacheable-response'
 import { clientsClaim } from 'workbox-core'
@@ -56,17 +56,11 @@ registerRoute(
   })
 )
 
-// API: NetworkFirst with cache fallback
+// API: always hit the local Go backend. Cached API responses can hide the fact
+// that the backend is not running, especially when launching an installed PWA.
 registerRoute(
-  ({ url }) => url.pathname.startsWith('/api/'),
-  new NetworkFirst({
-    cacheName: 'api-cache',
-    networkTimeoutSeconds: 5,
-    plugins: [
-      new CacheableResponsePlugin({ statuses: [0, 200] }),
-      new ExpirationPlugin({ maxEntries: 50, maxAgeSeconds: 60 * 60 * 24 * 30 })
-    ]
-  })
+  ({ url }) => url.pathname === '/api' || url.pathname.startsWith('/api/'),
+  new NetworkOnly()
 )
 
 // Offline fallback

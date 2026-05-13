@@ -54,12 +54,14 @@ write_windows_launcher() {
   local out_dir="$1"
   cat > "$out_dir/start-autorun.bat" <<'BAT'
 @echo off
+chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
 if "%PORT%"=="" set PORT=8080
 start "AutoRun Server" /min "%~dp0autorun.exe"
-echo AutoRun started at http://localhost:%PORT%
-echo Close the "AutoRun Server" window to stop the service.
+echo AutoRun 正在启动：http://localhost:%PORT%
+echo 请从本文件或 autorun.exe 启动，不要只从 Windows PWA 图标启动。
+echo 关闭最后一个 AutoRun 页面后，后端会自动退出。
 BAT
 }
 
@@ -92,22 +94,37 @@ SH
 write_package_readme() {
   local out_dir="$1"
   cat > "$out_dir/README.txt" <<'TXT'
-AutoRun local package
+AutoRun 本地版使用说明
 
-Windows:
-  Double click start-autorun.bat.
+一、Windows 用户
 
-macOS:
-  Double click start-autorun.command, or run ./start-autorun.sh.
+1. 解压 zip 后，双击 start-autorun.bat。
+2. 程序会启动本地后端，并自动打开 http://localhost:8080。
+3. 如果你安装过 Windows PWA 图标，不要只从 PWA 图标启动。
+   PWA 只是浏览器应用，不能自己拉起本地后端。
+4. 如果 PWA 页面提示“本地服务未启动”，请回到本文件所在目录，
+   双击 start-autorun.bat 或 autorun.exe。
 
-Linux:
-  Run ./start-autorun.sh.
+二、macOS 用户
 
-The app opens http://localhost:8080 and stores no cloud deployment settings.
-Phone/password login is entered in the web page.
+1. 双击 start-autorun.command。
+2. 如果系统提示无法打开，可以在终端运行 ./start-autorun.sh。
 
-You can also run the autorun binary directly. It starts the local server and
-opens the browser automatically.
+三、Linux 用户
+
+在终端运行：
+
+  ./start-autorun.sh
+
+四、关闭方式
+
+关闭最后一个 AutoRun 浏览器页面后，后端会自动退出。
+如果你是从终端启动，也可以按 Ctrl+C 停止。
+
+五、账号说明
+
+手机号和密码在网页里输入。本地版不需要 Postgres、Redis 或云端数据库。
+登录态和定时配置只保存在当前电脑的本地用户配置目录中。
 TXT
 }
 
