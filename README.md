@@ -10,6 +10,13 @@
 
 开发者打包后，把 `release/AutoRun-*.zip` 发给用户。
 
+当前仓库也保留了已打包好的 zip：
+
+- `release/AutoRun-darwin-arm64.zip`
+- `release/AutoRun-darwin-amd64.zip`
+- `release/AutoRun-windows-amd64.zip`
+- `release/AutoRun-linux-amd64.zip`
+
 用户解压后：
 
 - Windows：双击 `start-autorun.bat`
