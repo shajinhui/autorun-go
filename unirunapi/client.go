@@ -109,10 +109,10 @@ func applyCommonHeaders(req *http.Request, sign, token string) {
 	req.Header.Set("sign", sign)
 	req.Header.Set("appkey", AppKey)
 	req.Header.Set("token", token)
-	req.Header.Set("Content-Type", "application/json; charset=UTF-8")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
 	req.Header.Set("User-Agent", userAgent)
+	if req.Method != http.MethodGet && req.Body != nil {
+		req.Header.Set("Content-Type", "application/json; charset=UTF-8")
+	}
 }
 
 func doUpstream(req *http.Request) ([]byte, error) {
@@ -127,13 +127,16 @@ func doUpstream(req *http.Request) ([]byte, error) {
 		return nil, err
 	}
 	if isHTMLResponse(respBody) {
-		return nil, fmt.Errorf("上游接口返回 HTML 拦截页，可能是本机网络被上游风控拦截")
+		return nil, fmt.Errorf("上游接口被风控拦截，请稍后重试或更换网络")
 	}
 	return respBody, nil
 }
 
 func decodeResponse[T any](respBody []byte, result *Response[T], label string) error {
 	if err := json.Unmarshal(respBody, result); err != nil {
+		if isHTMLResponse(respBody) {
+			return fmt.Errorf("%s: 上游接口被风控拦截，请稍后重试或更换网络", label)
+		}
 		return fmt.Errorf("%s: JSON解析失败: %v, raw=%s", label, err, string(respBody))
 	}
 	return nil
@@ -141,7 +144,13 @@ func decodeResponse[T any](respBody []byte, result *Response[T], label string) e
 
 func isHTMLResponse(body []byte) bool {
 	trimmed := strings.ToLower(strings.TrimSpace(string(body)))
-	return strings.HasPrefix(trimmed, "<!doctype html") || strings.HasPrefix(trimmed, "<html")
+	compact := strings.ReplaceAll(trimmed, " ", "")
+	return strings.HasPrefix(trimmed, "<html") ||
+		strings.HasPrefix(trimmed, "<!doctype") ||
+		strings.HasPrefix(compact, "<!doctypehtml") ||
+		strings.Contains(trimmed, "your request has been blocked") ||
+		strings.Contains(trimmed, "errors.aliyun.com") ||
+		strings.Contains(trimmed, "block_traceid")
 }
 
 // Login 模拟登录，返回统一对象，避免多返回值错位。
